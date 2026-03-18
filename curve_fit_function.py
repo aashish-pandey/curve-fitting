@@ -49,7 +49,9 @@ import os
 
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import get_column_letter, column_index_from_string
+from openpyxl.chart import ScatterChart, Reference, Series
+from openpyxl.chart.axis import ChartLines, GraphicalProperties as AxisGP
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -416,10 +418,11 @@ def fit_curves(
 
         return col_map
 
-    def _write_summary(ws, last_data_row, x_data, y_data, results):
+    def _write_summary(ws, last_data_row, x_data, y_data, results, n):
         """
         Write a compact model-summary table starting 3 rows below the data.
-        Columns: #  |  Name  |  Formula  |  R²  |  SSR  |  Parameters
+        Columns: #  |  Name  |  Formula  |  R²  |  Adj.R²  |  RMSE  |
+                 Diffusion Coefficient  |  Parameters  |  <one col per unique param name>
         """
         # ── style constants ────────────────────────────────────────────────
         FILL_HDR   = PatternFill(fill_type="solid", fgColor="2F5496")
@@ -428,8 +431,35 @@ def fit_curves(
         FONT_BOLD  = Font(bold=True)
         CENTRE     = Alignment(horizontal="center")
 
+        # diffusion coefficient per model: returns a formatted string
+        def _diff_coeff(num, params, pnames):
+            idx = {name: i for i, name in enumerate(pnames)}
+            if num == 1:
+                return _fp(params[idx["F"]])
+            elif num == 2:
+                return _fp(params[idx["G"]])
+            elif num == 3:
+                return f"{_fp(params[idx['F1']])}, {_fp(params[idx['F2']])}"
+            elif num in (4, 5, 6):
+                return _fp(params[idx["B"]])
+            elif num in (7, 8):
+                return f"{_fp(params[idx['K']])}, {_fp(params[idx['Q']])}"
+            return ""
+
+        # collect all unique param names in order of first appearance across models
+        all_pnames = []
+        seen_pnames = set()
+        for num in range(1, 9):
+            for p in _MODEL_META[num]["pnames"]:
+                if p not in seen_pnames:
+                    all_pnames.append(p)
+                    seen_pnames.add(p)
+
         start_row = last_data_row + 3
-        headers   = ["#", "Name", "Formula", "R²", "SSR", "Parameters"]
+        # fixed columns + "Parameters" (all-in-one) + one column per unique param name
+        fixed_headers = ["#", "Name", "Formula", "R²", "Adj. R²", "RMSE",
+                         "Diffusion Coefficient", "Parameters"]
+        headers = fixed_headers + all_pnames
 
         # header row
         for ci, h in enumerate(headers, start=1):
@@ -445,10 +475,37 @@ def fit_curves(
             ssr    = _ssr(y_data, y_pred)
             meta   = _MODEL_META[num]
             pnames = meta["pnames"]
-            pstr   = ",  ".join(f"{n}={_fp(v)}" for n, v in zip(pnames, params))
+            k      = len(params)
 
-            row_vals = [num, meta["name"], meta["formula"],
-                        round(r2, 8), ssr, pstr]
+            # Adj. R²: guard against divide-by-zero when n <= k+1
+            if n > k + 1:
+                adj_r2 = 1.0 - (1.0 - r2) * (n - 1) / (n - k - 1)
+            else:
+                adj_r2 = float("nan")
+
+            rmse       = math.sqrt(ssr / n) if n > 0 else float("nan")
+            diff_coeff = _diff_coeff(num, params, pnames)
+
+            # combined "Parameters" cell: "B=0.8000, F=1.5000"
+            all_params_str = ",  ".join(
+                f"{pn}={_fp(pv)}" for pn, pv in zip(pnames, params)
+            )
+
+            # individual param columns: raw numeric value, blank if not used by this model
+            param_lookup = {pn: pv for pn, pv in zip(pnames, params)}
+            param_cells  = [param_lookup.get(p, "") for p in all_pnames]
+
+            row_vals = [
+                num,
+                meta["name"],
+                meta["formula"],
+                round(r2, 8),
+                round(adj_r2, 8) if not math.isnan(adj_r2) else "N/A",
+                round(rmse, 8)   if not math.isnan(rmse)   else "N/A",
+                diff_coeff,
+                all_params_str,
+            ] + param_cells
+
             for ci, val in enumerate(row_vals, start=1):
                 cell = ws.cell(row=r, column=ci, value=val)
                 if num % 2 == 0:
@@ -456,9 +513,201 @@ def fit_curves(
                 if ci == 1:
                     cell.alignment = CENTRE
 
-        # reasonable column widths for the summary block
-        for col, width in zip(range(1, 7), [5, 18, 44, 14, 14, 48]):
+        # column widths: fixed cols + one per unique param name (raw values → narrow)
+        fixed_widths = [4, 18, 44, 12, 12, 12, 24, 40]
+        param_widths = [10] * len(all_pnames)
+        widths = fixed_widths + param_widths
+        for col, width in zip(range(1, len(widths) + 1), widths):
             ws.column_dimensions[get_column_letter(col)].width = width
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SECTION 5b – EXCEL CHARTS  (openpyxl native, no external libraries)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # One distinct colour per model (hex RGB, no #)
+    # _CHART_COLORS = [
+    #     "4472C4",   # 1 Mono-Exp           blue
+    #     "ED7D31",   # 2 Mono-Exp+Offset    orange
+    #     "A9D18E",   # 3 Bi-Exp             green
+    #     "FF0000",   # 4 Linear             red
+    #     "FFC000",   # 5 Inv.Linear         amber
+    #     "7030A0",   # 6 Inv.Lin+Offset     purple
+    #     "00B0F0",   # 7 Intermediate       cyan
+    #     "92D050",   # 8 Interm+Offset      lime
+    # ]
+    _CHART_COLORS = [
+        "FF0000",   # 1 Mono-Exp           red
+        "FF0000",
+        "FF0000",
+        "FF0000",
+        "FF0000",
+        "FF0000",
+        "FF0000",
+        "FF0000",
+    ]
+    def _make_chart(title, x_axis_lbl, y_axis_lbl, w, h, show_legend=True):
+        """Return a blank ScatterChart with shared formatting."""
+        c = ScatterChart()
+        c.scatterStyle     = "smoothMarker"
+        c.title            = title
+        c.title.overlay    = False      # title sits above plot, not inside it
+        c.x_axis.title     = x_axis_lbl
+        c.y_axis.title     = y_axis_lbl
+        c.x_axis.numFmt    = "General"
+        c.y_axis.numFmt    = "General"
+        c.x_axis.tickLblPos = "low"
+        c.y_axis.tickLblPos = "nextTo"
+        c.width            = w
+        c.height           = h
+        c.style            = 2
+        # light-gray major gridlines (default is near-black)
+        _gl_color = "BFBFBF"   # ← change this hex to adjust gridline shade
+        for axis in (c.x_axis, c.y_axis):
+            gl = ChartLines()
+            gl.spPr = AxisGP()
+            gl.spPr.ln.solidFill = _gl_color
+            axis.majorGridlines = gl
+        if show_legend:
+            c.legend.position = "r"
+            c.legend.overlay  = False
+        else:
+            c.legend = None
+        return c
+
+    def _data_series(ref, xref, label, symbol, color, line_w_emu,
+                     no_line=False, marker_color=None):
+        """
+        Return a styled Series object.
+        marker_color overrides the marker fill independently of the line color.
+        """
+        s = Series(ref, xref, title=label)
+        s.marker.symbol = symbol
+        s.marker.size   = 4             # small markers so they don't dominate
+        mc = marker_color or color
+        s.marker.graphicalProperties.solidFill          = mc
+        s.marker.graphicalProperties.line.solidFill     = mc
+        if no_line:
+            s.graphicalProperties.line.noFill = True
+        else:
+            s.graphicalProperties.line.solidFill = color
+            s.graphicalProperties.line.width     = line_w_emu
+        return s
+
+    def _write_charts(ws, x_col_idx, y_col_idx, row_nums, col_map, results, y_data):
+        """
+        Embed one pair of charts per model (fit + residual side-by-side).
+        Layout — 8 rows, each row = [Fit chart | Residual chart]:
+
+            Row 0:  Mono-Exp fit          |  Mono-Exp residuals
+            …
+            Row 7:  Interm+Offset fit     |  Interm+Offset residuals
+
+        Fit charts:      red ★ raw data  +  thin blue fitted line  +  legend
+        Residual charts: green zero line  +  red circles/line  +  no legend
+                         fixed shared Y-axis across all models
+        """
+        data_min = min(row_nums)
+        data_max = max(row_nums)
+
+        chart_w  = 16      # cm per chart
+        chart_h  = 12       # cm per chart
+        col_res  = 5      # column offset for the residual chart
+        row_step = 25      # rows per model pair
+        base_row = data_max + 16
+
+        # ── hidden zero-reference column for the green zero line ──────────────
+        zero_col  = ws.max_column + 1
+        _invis    = Font(color="FFFFFF", size=5)
+        ws.cell(row=data_min - 1, column=zero_col, value="__zero__").font = _invis
+        for rn in row_nums:
+            ws.cell(row=rn, column=zero_col, value=0.0).font = _invis
+        zero_yref = Reference(ws, min_col=zero_col,
+                              min_row=data_min, max_row=data_max)
+
+        # ── compute a single fixed Y-axis range for ALL residual charts ───────
+        all_res = []
+        for num in range(1, 9):
+            _, _, _, resid = results[num]
+            all_res.extend(r for r in resid if r is not None and not math.isnan(r))
+
+        if all_res:
+            raw_min  = min(all_res)
+            raw_max  = max(all_res)
+            raw_span = raw_max - raw_min
+        else:
+            raw_min, raw_max, raw_span = -1.0, 1.0, 2.0
+
+        y_span   = max(y_data) - min(y_data) if y_data else 1.0
+        min_span = y_span * 0.02
+        if raw_span < min_span:
+            raw_min  = -min_span / 2
+            raw_max  =  min_span / 2
+            raw_span = min_span
+
+        pad      = raw_span * 0.12
+        res_ymin = float(raw_min - pad)
+        res_ymax = float(raw_max + pad)
+
+        # ── per-model chart pair ──────────────────────────────────────────────
+        for idx, num in enumerate(range(1, 9)):
+            meta         = _MODEL_META[num]
+            fc_letter, rc_letter = col_map[num]
+            fc_idx       = column_index_from_string(fc_letter)
+            rc_idx       = column_index_from_string(rc_letter)
+            _, _, r2, _  = results[num]
+            anchor_row   = base_row + idx * row_step
+
+            xvals = Reference(ws, min_col=x_col_idx,
+                              min_row=data_min, max_row=data_max)
+
+            # ── FIT CHART ─────────────────────────────────────────────────
+            fit_chart = _make_chart(
+                title      = f"{meta['name']}  (R²={r2:.5f})",
+                x_axis_lbl = x_col,
+                y_axis_lbl = y_col,
+                w=chart_w, h=chart_h,
+                show_legend=True,
+            )
+            fit_chart.series.append(_data_series(
+                Reference(ws, min_col=y_col_idx, min_row=data_min, max_row=data_max),
+                xvals, label="Data",
+                symbol="dot", color="FF0000", line_w_emu=0,
+                no_line=True, marker_color="FF0000",
+            ))
+            fit_chart.series.append(_data_series(
+                Reference(ws, min_col=fc_idx, min_row=data_min, max_row=data_max),
+                xvals, label="Fit",
+                symbol="none", color="4472C4", line_w_emu=15000,
+            ))
+            ws.add_chart(fit_chart, f"A{anchor_row}")
+
+            # ── RESIDUAL CHART ────────────────────────────────────────────
+            res_chart = _make_chart(
+                title       = f"{meta['name']} — Residuals",
+                x_axis_lbl  = x_col,
+                y_axis_lbl  = "Residual",
+                w=chart_w, h=chart_h,
+                show_legend = True,      # show Zero / Residual legend
+            )
+            res_chart.y_axis.scaling.min = res_ymin
+            res_chart.y_axis.scaling.max = res_ymax
+
+            # green zero line — behind residuals
+            zero_ser = Series(zero_yref, xvals, title="Zero")
+            zero_ser.marker.symbol                      = "none"
+            zero_ser.graphicalProperties.line.solidFill = "70AD47"
+            zero_ser.graphicalProperties.line.width     = 15000
+            res_chart.series.append(zero_ser)
+
+            # red residual dots connected by a thin red line
+            res_chart.series.append(_data_series(
+                Reference(ws, min_col=rc_idx, min_row=data_min, max_row=data_max),
+                xvals, label="Residual",
+                symbol="circle", color="FF0000", line_w_emu=12700,
+                marker_color="FF0000",
+            ))
+            ws.add_chart(res_chart,
+                         f"{get_column_letter(col_res + 1)}{anchor_row}")
 
     def process_sheet(ws):
         """Full pipeline for a single worksheet."""
@@ -488,9 +737,10 @@ def fit_curves(
             print(f"    M{num}  {meta['name']:<18} R²={r2:.6f}   {pstr}")
 
         # -- write to sheet --------------------------------------------------
-        _write_fitted_columns(ws, header_row, y_idx, row_nums, results)
+        col_map  = _write_fitted_columns(ws, header_row, y_idx, row_nums, results)
         last_row = max(row_nums)
-        _write_summary(ws, last_row, x_data, y_data, results)
+        _write_summary(ws, last_row, x_data, y_data, results, n=len(x_data))
+        _write_charts(ws, x_idx, y_idx, row_nums, col_map, results, y_data)
 
     # ─────────────────────────────────────────────────────────────────────────
     # SECTION 6 – MAIN EXECUTION
