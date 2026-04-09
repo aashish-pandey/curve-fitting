@@ -318,7 +318,7 @@ tr:nth-child(even) { background: #f9f9f9; }
     
     html.append('</body></html>')
     
-    with open(output_path, 'w') as f:
+    with open(output_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(html))
     
     print(f"\nDone: {output_path}")
