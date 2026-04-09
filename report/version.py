@@ -243,27 +243,48 @@ def make_svg_chart(x, y, fit, res, title, r2, width=800, height=300):
     return '\n'.join(svg)
 
 
-def generate_pdf_report(excel_path, output_dir, output_filename=None):
-    """Generate HTML report from Excel file."""
+def generate_pdf_report(input_folder, output_folder=None):
+    """Generate HTML report from all Excel files in a folder."""
     
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
+    if output_folder is None:
+        output_folder = input_folder
     
-    if not output_filename:
-        output_filename = os.path.splitext(os.path.basename(excel_path))[0] + '_report.html'
+    if output_folder:
+        os.makedirs(output_folder, exist_ok=True)
     
-    output_path = os.path.join(output_dir, output_filename) if output_dir else output_filename
+    output_filename = "curve_fitting_report.html"
+    output_path = os.path.join(output_folder, output_filename) if output_folder else output_filename
     
-    print(f"Reading: {excel_path}")
-    sheets = read_xlsx(excel_path)
-    print(f"Found {len(sheets)} sheets")
+    # Find all xlsx files
+    xlsx_files = [f for f in os.listdir(input_folder) if f.endswith('.xlsx') and not f.startswith('~')]
+    xlsx_files.sort()
     
-    results = []
-    for name, data in sheets.items():
-        r = process_sheet(name, data)
-        results.append(r if r else {'name': name, 'error': True})
-        if r:
-            print(f"  {name}: {r['model']} (R²={r['r2']:.4f})")
+    print(f"Found {len(xlsx_files)} Excel files in: {input_folder}")
+    
+    all_results = []
+    
+    for xlsx_file in xlsx_files:
+        excel_path = os.path.join(input_folder, xlsx_file)
+        sample_name = os.path.splitext(xlsx_file)[0]
+        
+        print(f"\nReading: {xlsx_file}")
+        try:
+            sheets = read_xlsx(excel_path)
+            print(f"  Found {len(sheets)} sheets")
+            
+            for sheet_name, data in sheets.items():
+                r = process_sheet(sheet_name, data)
+                if r:
+                    r['sample_name'] = sample_name
+                    r['peak_name'] = sheet_name
+                    all_results.append(r)
+                    print(f"    {sheet_name}: {r['model']} (R²={r['r2']:.4f})")
+                else:
+                    all_results.append({'sample_name': sample_name, 'peak_name': sheet_name, 'error': True})
+        except Exception as e:
+            print(f"  Error: {e}")
+    
+    print(f"\nTotal results: {len(all_results)}")
     
     html = ['''<!DOCTYPE html>
 <html>
@@ -289,32 +310,29 @@ tr:nth-child(even) { background: #f9f9f9; }
     
     html.append('<h2>Section 1: Summary</h2>')
     html.append('<table>')
-    html.append('<tr><th>Sheet</th><th>Model</th><th>Formula</th><th>R²</th><th>Adj R²</th><th>Diff Coef</th><th>Parameters</th></tr>')
+    html.append('<tr><th>Sample Name</th><th>Peak Name</th><th>Model (Equation)</th><th>R²</th><th>Diffusion Coefficient</th></tr>')
     
-    for r in results:
+    for r in all_results:
         if r.get('error'):
-            html.append(f'<tr><td>{r["name"]}</td><td colspan="6">Error processing</td></tr>')
+            html.append(f'<tr><td>{r["sample_name"]}</td><td>{r["peak_name"]}</td><td colspan="3">Error processing</td></tr>')
         else:
-            n = len(r['x']) or 50
-            p = len(r['params']) or 2
-            adj_r2 = 1 - (1 - r['r2']) * (n - 1) / max(n - p - 1, 1)
-            formula = (r['formula'][:30] + '...') if len(str(r['formula'])) > 30 else r['formula']
-            params = ', '.join(f"{k}={v:.2e}" if isinstance(v, float) else f"{k}={v}" 
-                              for k, v in list(r['params'].items())[:3])
-            diff = f"{r['diff_coef']:.3e}" if isinstance(r['diff_coef'], float) else 'N/A'
-            html.append(f'<tr><td>{r["name"]}</td><td>{r["model"]}</td><td>{formula}</td>'
-                       f'<td>{r["r2"]:.5f}</td><td>{adj_r2:.5f}</td><td>{diff}</td><td>{params}</td></tr>')
+            model_eq = f"{r['model']} ({r['formula']})" if r['formula'] else r['model']
+            if len(model_eq) > 50:
+                model_eq = model_eq[:47] + '...'
+            diff = f"{r['diff_coef']:.4e}" if isinstance(r['diff_coef'], float) else 'N/A'
+            html.append(f'<tr><td>{r["sample_name"]}</td><td>{r["peak_name"]}</td><td>{model_eq}</td>'
+                       f'<td>{r["r2"]:.5f}</td><td>{diff}</td></tr>')
     
     html.append('</table>')
     
     html.append('<h2>Section 2: Fitted Curves & Residuals</h2>')
     
-    for r in results:
+    for r in all_results:
         if r.get('error') or not r.get('x'):
             continue
         
         html.append(f'<div class="chart-container">')
-        html.append(f'<h3>{r["name"]} - {r["model"]}</h3>')
+        html.append(f'<h3>{r["sample_name"]} / {r["peak_name"]} - {r["model"]}</h3>')
         svg = make_svg_chart(r['x'], r['y'], r['fit'], r['res'], 'Fitted Curve', r['r2'])
         html.append(svg)
         html.append('</div>')
@@ -324,13 +342,14 @@ tr:nth-child(even) { background: #f9f9f9; }
     with open(output_path, 'w') as f:
         f.write('\n'.join(html))
     
-    print(f"Done: {output_path}")
+    print(f"\nDone: {output_path}")
     print("Open in browser and print to PDF (Ctrl+P / Cmd+P)")
     return output_path
 
 
 if __name__ == "__main__":
     SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-    EXCEL_PATH = os.path.join(SCRIPT_DIR, "example.xlsx")
-    OUTPUT_DIR = SCRIPT_DIR
-    generate_pdf_report(EXCEL_PATH, OUTPUT_DIR)
+    INPUT_FOLDER = SCRIPT_DIR  # folder containing xlsx files
+    OUTPUT_FOLDER = SCRIPT_DIR  # where to save report
+    
+    generate_pdf_report(INPUT_FOLDER, OUTPUT_FOLDER)
