@@ -43,10 +43,10 @@ def read_xlsx(filepath):
 
 def process_sheet(name, data):
     """Extract best model and plot data from sheet."""
+    # Find summary section (row with '#' in first column)
     summary_idx = None
     for i, row in enumerate(data):
-        row_str = ' '.join(str(c).lower() for c in row if c)
-        if 'name' in row_str and 'formula' in row_str:
+        if row and row[0] == '#':
             summary_idx = i
             break
     
@@ -55,30 +55,31 @@ def process_sheet(name, data):
         return None
     
     print(f"    DEBUG: Summary at row {summary_idx}")
-    print(f"    DEBUG: Summary headers: {data[summary_idx][:10]}")
     
+    # Summary headers
     headers = [str(h).strip() if h else '' for h in data[summary_idx]]
     headers_lower = [h.lower() for h in headers]
     
+    # Find column indices in summary
     def find_col(keywords):
         for i, h in enumerate(headers_lower):
             if any(k in h for k in keywords):
                 return i
         return None
     
-    idx_col = find_col(['#'])
+    idx_col = 0  # '#' is always first column
     name_col = find_col(['name'])
     formula_col = find_col(['formula'])
-    r2_col = find_col(['r²', 'r2'])
+    r2_col = find_col(['r²', 'r2', 'r^2'])
     diff_col = find_col(['diffusion'])
     
-    print(f"    DEBUG: Columns - idx:{idx_col} name:{name_col} formula:{formula_col} r2:{r2_col} diff:{diff_col}")
+    print(f"    DEBUG: Summary cols - name:{name_col} formula:{formula_col} r2:{r2_col} diff:{diff_col}")
     
-    if len(data) > summary_idx + 1:
-        print(f"    DEBUG: First data row: {data[summary_idx + 1][:10]}")
-    
+    # Find best R² model
     best_r2, best_row = -1, None
     for row in data[summary_idx + 1:]:
+        if not row or row[0] is None:
+            break
         if r2_col is not None and len(row) > r2_col and row[r2_col] is not None:
             try:
                 r2 = float(row[r2_col])
@@ -91,44 +92,37 @@ def process_sheet(name, data):
         print(f"    DEBUG: No valid R² found")
         return None
     
-    model_name = best_row[name_col] if name_col is not None and len(best_row) > name_col else 'Unknown'
-    print(f"    DEBUG: Best model: {model_name} R²={best_r2}")
+    model_name = str(best_row[name_col]) if name_col is not None else 'Unknown'
+    model_num = int(best_row[idx_col]) if best_row[idx_col] is not None else 1
+    print(f"    DEBUG: Best model #{model_num}: {model_name} R²={best_r2}")
     
-    model_to_col = {
-        'Mono-Exp': 'MonoExp',
-        'Mono-Exp+Offset': 'MonoExpOffset', 
-        'Bi-Exp': 'BiExp',
-        'Linear': 'Linear',
-        'Inv.Linear': 'InvLinear',
-        'Inv.Lin+Offset': 'InvLinearOffset',
-        'Intermediate': 'Intermediate',
-        'Interm+Offset': 'IntermediateOffset',
-    }
-    col_prefix = model_to_col.get(model_name, '')
+    # Calculate fit/res column indices based on model #
+    # #1 → cols 5,6 (F,G), #2 → cols 7,8 (H,I), etc.
+    fit_col = 5 + (model_num - 1) * 2
+    res_col = fit_col + 1
     
-    data_headers = [str(h).lower() if h else '' for h in data[0]]
-    print(f"    DEBUG: Data headers: {data_headers[:10]}")
+    # x and y are always first two columns (A=0, B=1)
+    x_col = 0
+    y_col = 1
     
-    x_col = next((i for i, h in enumerate(data_headers) if 'b_val' in h or 'bval' in h or 'bvalue' in h), 0)
-    y_col = next((i for i, h in enumerate(data_headers) if 'integral' in h), 1)
+    print(f"    DEBUG: x_col:{x_col} y_col:{y_col} fit_col:{fit_col} res_col:{res_col}")
     
-    fit_col = None
-    res_col = None
-    if col_prefix:
-        fit_col = next((i for i, h in enumerate(data_headers) if f'{col_prefix.lower()}_fit' in h), None)
-        res_col = next((i for i, h in enumerate(data_headers) if f'{col_prefix.lower()}_res' in h), None)
-    
-    print(f"    DEBUG: x:{x_col} y:{y_col} fit:{fit_col} res:{res_col}")
-    
+    # Read data points
     x, y, fit, res = [], [], [], []
     for row in data[1:summary_idx]:
+        if not row or row[0] is None:
+            continue
         try:
-            xv = float(row[x_col]) if row[x_col] else None
-            if xv is not None:
+            xv = float(row[x_col]) if row[x_col] is not None else None
+            yv = float(row[y_col]) if row[y_col] is not None else None
+            if xv is not None and yv is not None:
                 x.append(xv)
-                y.append(float(row[y_col]) if row[y_col] else None)
-                fit.append(float(row[fit_col]) if fit_col is not None and len(row) > fit_col and row[fit_col] else None)
-                res.append(float(row[res_col]) if res_col is not None and len(row) > res_col and row[res_col] else None)
+                y.append(yv)
+                fv = float(row[fit_col]) if len(row) > fit_col and row[fit_col] is not None else None
+                rv = float(row[res_col]) if len(row) > res_col and row[res_col] is not None else None
+                fit.append(fv)
+                # Use residual from file, or calculate if None
+                res.append(rv if rv is not None else (yv - fv if fv is not None else None))
         except:
             pass
     
