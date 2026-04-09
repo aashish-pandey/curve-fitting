@@ -8,6 +8,24 @@ import os
 import openpyxl
 
 
+def sanitize(text):
+    """Replace special chars that cause encoding issues."""
+    if not isinstance(text, str):
+        return text
+    replacements = {
+        '·': '*',
+        '−': '-',
+        '²': '2',
+        '³': '3',
+        '±': '+/-',
+        '×': 'x',
+        '÷': '/',
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
+
+
 def read_xlsx(filepath):
     """Read xlsx using openpyxl. Returns {sheet_name: [[row], ...]}"""
     wb = openpyxl.load_workbook(filepath, data_only=True)
@@ -121,8 +139,8 @@ def process_sheet(name, data):
     
     return {
         'name': name,
-        'model': model_name,
-        'formula': formula,
+        'model': sanitize(str(model_name)),
+        'formula': sanitize(str(formula)) if formula else '',
         'r2': best_r2,
         'diff_coef': diff_coef,
         'x': x, 'y': y, 'fit': fit, 'res': res
