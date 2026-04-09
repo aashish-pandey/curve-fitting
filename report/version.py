@@ -71,7 +71,7 @@ def process_sheet(name, data):
     name_col = find_col(['name'])
     formula_col = find_col(['formula'])
     r2_col = find_col(['r²', 'r2', 'r^2'])
-    diff_col = find_col(['diffusion'])
+    diff_col = 6  # 7th column for diffusion coefficient
     
     print(f"    DEBUG: Summary cols - name:{name_col} formula:{formula_col} r2:{r2_col} diff:{diff_col}")
     
@@ -91,35 +91,53 @@ def process_sheet(name, data):
     if not best_row:
         print(f"    DEBUG: No valid R² found")
         return None
-    
+
     model_name = str(best_row[name_col]) if name_col is not None else 'Unknown'
     model_num = int(best_row[idx_col]) if best_row[idx_col] is not None else 1
     print(f"    DEBUG: Best model #{model_num}: {model_name} R²={best_r2}")
     
-    # Calculate fit/res column indices based on model #
-    # #1 → cols 5,6 (F,G), #2 → cols 7,8 (H,I), etc.
-    fit_col = 5 + (model_num - 1) * 2
-    res_col = fit_col + 1
+    # Data headers (row 0)
+    data_headers = [str(h).lower() if h else '' for h in data[0]]
+    print(f"    DEBUG: Data headers: {data_headers[:10]}")
     
-    # x and y are always first two columns (A=0, B=1)
-    x_col = 0
-    y_col = 1
+    # Find x (b_value) and y (I_norm) columns by header name
+    x_col = None
+    y_col = None
+    for i, h in enumerate(data_headers):
+        if 'b_value' in h or 'bvalue' in h:
+            x_col = i
+        if 'i_norm' in h or 'inorm' in h:
+            y_col = i
     
-    print(f"    DEBUG: x_col:{x_col} y_col:{y_col} fit_col:{fit_col} res_col:{res_col}")
+    # Find fit/res columns by model name in data headers
+    # Model name like "Mono-Exp" -> look for "monoexp_fit" and "monoexp_res"
+    model_col_name = model_name.replace('-', '').replace('+', '').replace('.', '').replace(' ', '').lower()
+    fit_col = None
+    res_col = None
+    for i, h in enumerate(data_headers):
+        if h == f'{model_col_name}_fit':
+            fit_col = i
+        if h == f'{model_col_name}_res':
+            res_col = i
+    
+    print(f"    DEBUG: model_col_name:{model_col_name} x_col:{x_col} y_col:{y_col} fit_col:{fit_col} res_col:{res_col}")
     
     # Read data points
     x, y, fit, res = [], [], [], []
     for row in data[1:summary_idx]:
-        if not row or row[0] is None:
+        if not row:
+            continue
+        # Skip truly empty rows (all None)
+        if all(cell is None for cell in row[:5]):
             continue
         try:
-            xv = float(row[x_col]) if row[x_col] is not None else None
-            yv = float(row[y_col]) if row[y_col] is not None else None
+            xv = float(row[x_col]) if x_col is not None and row[x_col] is not None else None
+            yv = float(row[y_col]) if y_col is not None and row[y_col] is not None else None
             if xv is not None and yv is not None:
                 x.append(xv)
                 y.append(yv)
-                fv = float(row[fit_col]) if len(row) > fit_col and row[fit_col] is not None else None
-                rv = float(row[res_col]) if len(row) > res_col and row[res_col] is not None else None
+                fv = float(row[fit_col]) if fit_col is not None and len(row) > fit_col and row[fit_col] is not None else None
+                rv = float(row[res_col]) if res_col is not None and len(row) > res_col and row[res_col] is not None else None
                 fit.append(fv)
                 # Use residual from file, or calculate if None
                 res.append(rv if rv is not None else (yv - fv if fv is not None else None))
@@ -127,7 +145,7 @@ def process_sheet(name, data):
             pass
     
     print(f"    DEBUG: {len(x)} data points")
-    
+   
     diff_coef = best_row[diff_col] if diff_col is not None and len(best_row) > diff_col else None
     formula = best_row[formula_col] if formula_col is not None and len(best_row) > formula_col else ''
     
@@ -136,7 +154,7 @@ def process_sheet(name, data):
         'model': sanitize(str(model_name)),
         'formula': sanitize(str(formula)) if formula else '',
         'r2': best_r2,
-        'diff_coef': diff_coef,
+        'diff_coef': float(diff_coef) if diff_coef is not None else None,
         'x': x, 'y': y, 'fit': fit, 'res': res
     }
 
@@ -171,7 +189,7 @@ def make_svg_chart(x, y, fit, res, title, r2, width=800, height=300):
     svg.append('<rect width="100%" height="100%" fill="white"/>')
     
     # Left chart: Fitted curve
-    svg.append(f'<text x="{pad + chart_w//2}" y="20" text-anchor="middle" font-size="14" font-weight="bold">{title} (R² = {r2:.5f})</text>')
+    svg.append(f'<text x="{pad + chart_w//2}" y="20" text-anchor="middle" font-size="14" font-weight="bold">{title} (R2 = {r2:.5f})</text>')
     
     svg.append(f'<line x1="{pad}" y1="{height-pad}" x2="{pad+chart_w}" y2="{height-pad}" stroke="black"/>')
     svg.append(f'<line x1="{pad}" y1="{pad}" x2="{pad}" y2="{height-pad}" stroke="black"/>')
@@ -179,8 +197,8 @@ def make_svg_chart(x, y, fit, res, title, r2, width=800, height=300):
     svg.append(f'<text x="{pad + chart_w//2}" y="{height-10}" text-anchor="middle" font-size="11">b-value</text>')
     svg.append(f'<text x="15" y="{height//2}" text-anchor="middle" font-size="11" transform="rotate(-90 15 {height//2})">Signal</text>')
     
-    svg.append(f'<text x="{pad}" y="{height-pad+15}" text-anchor="middle" font-size="9">{x_min:.0f}</text>')
-    svg.append(f'<text x="{pad+chart_w}" y="{height-pad+15}" text-anchor="middle" font-size="9">{x_max:.0f}</text>')
+    svg.append(f'<text x="{pad}" y="{height-pad+15}" text-anchor="middle" font-size="9">{x_min:.2f}</text>')
+    svg.append(f'<text x="{pad+chart_w}" y="{height-pad+15}" text-anchor="middle" font-size="9">{x_max:.2f}</text>')
     svg.append(f'<text x="{pad-5}" y="{height-pad}" text-anchor="end" font-size="9">{y_min:.2f}</text>')
     svg.append(f'<text x="{pad-5}" y="{pad+5}" text-anchor="end" font-size="9">{y_max:.2f}</text>')
     
@@ -220,10 +238,10 @@ def make_svg_chart(x, y, fit, res, title, r2, width=800, height=300):
         svg.append(f'<text x="{offset + chart_w//2}" y="{height-10}" text-anchor="middle" font-size="11">b-value</text>')
         svg.append(f'<text x="{offset-45}" y="{height//2}" text-anchor="middle" font-size="11" transform="rotate(-90 {offset-45} {height//2})">Residual</text>')
         
-        svg.append(f'<text x="{offset}" y="{height-pad+15}" text-anchor="middle" font-size="9">{x_min:.0f}</text>')
-        svg.append(f'<text x="{offset+chart_w}" y="{height-pad+15}" text-anchor="middle" font-size="9">{x_max:.0f}</text>')
-        svg.append(f'<text x="{offset-5}" y="{height-pad}" text-anchor="end" font-size="9">{r_min:.3f}</text>')
-        svg.append(f'<text x="{offset-5}" y="{pad+5}" text-anchor="end" font-size="9">{r_max:.3f}</text>')
+        svg.append(f'<text x="{offset}" y="{height-pad+15}" text-anchor="middle" font-size="9">{x_min:.2f}</text>')
+        svg.append(f'<text x="{offset+chart_w}" y="{height-pad+15}" text-anchor="middle" font-size="9">{x_max:.2f}</text>')
+        svg.append(f'<text x="{offset-5}" y="{height-pad}" text-anchor="end" font-size="9">{r_min:.4f}</text>')
+        svg.append(f'<text x="{offset-5}" y="{pad+5}" text-anchor="end" font-size="9">{r_max:.4f}</text>')
         
         for xi, ri in res_points:
             px = offset + (sx(xi) - pad)
@@ -269,7 +287,7 @@ def generate_pdf_report(input_folder, output_folder=None):
                     r['sample_name'] = sample_name
                     r['peak_name'] = sheet_name
                     all_results.append(r)
-                    print(f"    {sheet_name}: {r['model']} (R²={r['r2']:.4f})")
+                    print(f"    {sheet_name}: {r['model']} (R2={r['r2']:.4f})")
                 else:
                     all_results.append({'sample_name': sample_name, 'peak_name': sheet_name, 'error': True})
         except Exception as e:
@@ -301,7 +319,7 @@ tr:nth-child(even) { background: #f9f9f9; }
     
     html.append('<h2>Section 1: Summary</h2>')
     html.append('<table>')
-    html.append('<tr><th>Sample Name</th><th>Peak Name</th><th>Model (Equation)</th><th>R²</th><th>Diffusion Coefficient</th></tr>')
+    html.append('<tr><th>Sample Name</th><th>Peak Name</th><th>Model (Equation)</th><th>R2</th><th>Diffusion Coefficient</th></tr>')
     
     for r in all_results:
         if r.get('error'):
@@ -340,7 +358,7 @@ tr:nth-child(even) { background: #f9f9f9; }
 
 if __name__ == "__main__":
     SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-    INPUT_FOLDER = SCRIPT_DIR  # folder containing xlsx files
-    OUTPUT_FOLDER = SCRIPT_DIR  # where to save report
+    INPUT_FOLDER = SCRIPT_DIR
+    OUTPUT_FOLDER = SCRIPT_DIR
     
     generate_pdf_report(INPUT_FOLDER, OUTPUT_FOLDER)
