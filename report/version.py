@@ -1,69 +1,24 @@
 #!/usr/bin/env python3
 """
 NMR Curve Fitting Report Generator
-Pure Python - generates HTML report with SVG charts.
-Open in browser and print to PDF.
+Generates HTML report with SVG charts from Excel curve fitting data.
 """
 
 import os
-import re
-import zipfile
-import xml.etree.ElementTree as ET
+import openpyxl
 
 
 def read_xlsx(filepath):
-    """Read xlsx without external libs. Returns {sheet_name: [[row], ...]}"""
+    """Read xlsx using openpyxl. Returns {sheet_name: [[row], ...]}"""
+    wb = openpyxl.load_workbook(filepath, data_only=True)
     sheets = {}
     
-    with zipfile.ZipFile(filepath, 'r') as z:
-        # Shared strings
-        shared_strings = []
-        if 'xl/sharedStrings.xml' in z.namelist():
-            tree = ET.parse(z.open('xl/sharedStrings.xml'))
-            ns = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
-            for si in tree.findall(f'.//{ns}si'):
-                shared_strings.append(''.join(t.text or '' for t in si.iter(f'{ns}t')))
-        
-        # Sheet names
-        tree = ET.parse(z.open('xl/workbook.xml'))
-        ns = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
-        sheet_names = [s.get('name') for s in tree.findall(f'.//{ns}sheet')]
-        
-        # Read each sheet
-        for idx, name in enumerate(sheet_names):
-            sheet_file = f'xl/worksheets/sheet{idx + 1}.xml'
-            if sheet_file not in z.namelist():
-                continue
-            
-            tree = ET.parse(z.open(sheet_file))
-            rows_data = {}
-            
-            for row in tree.findall(f'.//{ns}row'):
-                row_num = int(row.get('r'))
-                rows_data[row_num] = {}
-                
-                for cell in row.findall(f'{ns}c'):
-                    col = re.match(r'([A-Z]+)', cell.get('r')).group(1)
-                    col_idx = sum((ord(c) - 64) * (26 ** i) for i, c in enumerate(reversed(col))) - 1
-                    
-                    val_elem = cell.find(f'{ns}v')
-                    if val_elem is not None and val_elem.text:
-                        if cell.get('t') == 's':
-                            val = shared_strings[int(val_elem.text)]
-                        else:
-                            try:
-                                val = float(val_elem.text)
-                            except:
-                                val = val_elem.text
-                    else:
-                        val = None
-                    rows_data[row_num][col_idx] = val
-            
-            if rows_data:
-                max_row = max(rows_data.keys())
-                max_col = max(max(r.keys()) for r in rows_data.values() if r) + 1
-                sheets[name] = [[rows_data.get(r, {}).get(c) for c in range(max_col)] 
-                               for r in range(1, max_row + 1)]
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        data = []
+        for row in ws.iter_rows(values_only=True):
+            data.append(list(row))
+        sheets[sheet_name] = data
     
     return sheets
 
@@ -78,7 +33,11 @@ def process_sheet(name, data):
             break
     
     if summary_idx is None:
+        print(f"    DEBUG: No summary section found")
         return None
+    
+    print(f"    DEBUG: Summary at row {summary_idx}")
+    print(f"    DEBUG: Summary headers: {data[summary_idx][:10]}")
     
     headers = [str(h).strip() if h else '' for h in data[summary_idx]]
     headers_lower = [h.lower() for h in headers]
@@ -93,12 +52,16 @@ def process_sheet(name, data):
     name_col = find_col(['name'])
     formula_col = find_col(['formula'])
     r2_col = find_col(['r²', 'r2'])
-    diff_col = find_col(['diffusion'])  # dedicated column
-    param_col = find_col(['parameters'])
+    diff_col = find_col(['diffusion'])
+    
+    print(f"    DEBUG: Columns - idx:{idx_col} name:{name_col} formula:{formula_col} r2:{r2_col} diff:{diff_col}")
+    
+    if len(data) > summary_idx + 1:
+        print(f"    DEBUG: First data row: {data[summary_idx + 1][:10]}")
     
     best_r2, best_row = -1, None
     for row in data[summary_idx + 1:]:
-        if r2_col is not None and row[r2_col] is not None:
+        if r2_col is not None and len(row) > r2_col and row[r2_col] is not None:
             try:
                 r2 = float(row[r2_col])
                 if r2 > best_r2:
@@ -107,12 +70,12 @@ def process_sheet(name, data):
                 pass
     
     if not best_row:
+        print(f"    DEBUG: No valid R² found")
         return None
     
-    # Get model name and find corresponding fit/res columns
-    model_name = best_row[name_col] if name_col is not None else 'Unknown'
+    model_name = best_row[name_col] if name_col is not None and len(best_row) > name_col else 'Unknown'
+    print(f"    DEBUG: Best model: {model_name} R²={best_r2}")
     
-    # Map model name to column prefix (from curve_fit_function.py _MODEL_META)
     model_to_col = {
         'Mono-Exp': 'MonoExp',
         'Mono-Exp+Offset': 'MonoExpOffset', 
@@ -126,15 +89,18 @@ def process_sheet(name, data):
     col_prefix = model_to_col.get(model_name, '')
     
     data_headers = [str(h).lower() if h else '' for h in data[0]]
+    print(f"    DEBUG: Data headers: {data_headers[:10]}")
+    
     x_col = next((i for i, h in enumerate(data_headers) if 'b_val' in h or 'bval' in h or 'bvalue' in h), 0)
     y_col = next((i for i, h in enumerate(data_headers) if 'integral' in h), 1)
     
-    # Find fit/res columns using the model's column prefix
     fit_col = None
     res_col = None
     if col_prefix:
         fit_col = next((i for i, h in enumerate(data_headers) if f'{col_prefix.lower()}_fit' in h), None)
         res_col = next((i for i, h in enumerate(data_headers) if f'{col_prefix.lower()}_res' in h), None)
+    
+    print(f"    DEBUG: x:{x_col} y:{y_col} fit:{fit_col} res:{res_col}")
     
     x, y, fit, res = [], [], [], []
     for row in data[1:summary_idx]:
@@ -143,16 +109,15 @@ def process_sheet(name, data):
             if xv is not None:
                 x.append(xv)
                 y.append(float(row[y_col]) if row[y_col] else None)
-                fit.append(float(row[fit_col]) if fit_col is not None and row[fit_col] else None)
-                res.append(float(row[res_col]) if res_col is not None and row[res_col] else None)
+                fit.append(float(row[fit_col]) if fit_col is not None and len(row) > fit_col and row[fit_col] else None)
+                res.append(float(row[res_col]) if res_col is not None and len(row) > res_col and row[res_col] else None)
         except:
             pass
     
-    # Get diffusion coefficient directly from dedicated column
-    diff_coef = best_row[diff_col] if diff_col is not None else None
+    print(f"    DEBUG: {len(x)} data points")
     
-    # Get formula
-    formula = best_row[formula_col] if formula_col is not None else ''
+    diff_coef = best_row[diff_col] if diff_col is not None and len(best_row) > diff_col else None
+    formula = best_row[formula_col] if formula_col is not None and len(best_row) > formula_col else ''
     
     return {
         'name': name,
