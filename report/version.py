@@ -80,10 +80,11 @@ def process_sheet(name, data):
     if summary_idx is None:
         return None
     
-    headers = [str(h).lower().strip() if h else '' for h in data[summary_idx]]
+    headers = [str(h).strip() if h else '' for h in data[summary_idx]]
+    headers_lower = [h.lower() for h in headers]
     
     def find_col(keywords):
-        for i, h in enumerate(headers):
+        for i, h in enumerate(headers_lower):
             if any(k in h for k in keywords):
                 return i
         return None
@@ -92,11 +93,12 @@ def process_sheet(name, data):
     name_col = find_col(['name'])
     formula_col = find_col(['formula'])
     r2_col = find_col(['r²', 'r2'])
-    param_col = find_col(['param'])
+    diff_col = find_col(['diffusion'])  # dedicated column
+    param_col = find_col(['parameters'])
     
     best_r2, best_row = -1, None
     for row in data[summary_idx + 1:]:
-        if r2_col and row[r2_col]:
+        if r2_col is not None and row[r2_col] is not None:
             try:
                 r2 = float(row[r2_col])
                 if r2 > best_r2:
@@ -107,13 +109,32 @@ def process_sheet(name, data):
     if not best_row:
         return None
     
-    model_idx = int(best_row[idx_col]) if idx_col and best_row[idx_col] else 1
+    # Get model name and find corresponding fit/res columns
+    model_name = best_row[name_col] if name_col is not None else 'Unknown'
+    
+    # Map model name to column prefix (from curve_fit_function.py _MODEL_META)
+    model_to_col = {
+        'Mono-Exp': 'MonoExp',
+        'Mono-Exp+Offset': 'MonoExpOffset', 
+        'Bi-Exp': 'BiExp',
+        'Linear': 'Linear',
+        'Inv.Linear': 'InvLinear',
+        'Inv.Lin+Offset': 'InvLinearOffset',
+        'Intermediate': 'Intermediate',
+        'Interm+Offset': 'IntermediateOffset',
+    }
+    col_prefix = model_to_col.get(model_name, '')
     
     data_headers = [str(h).lower() if h else '' for h in data[0]]
-    x_col = next((i for i, h in enumerate(data_headers) if 'b_val' in h or 'bval' in h), 0)
+    x_col = next((i for i, h in enumerate(data_headers) if 'b_val' in h or 'bval' in h or 'bvalue' in h), 0)
     y_col = next((i for i, h in enumerate(data_headers) if 'integral' in h), 1)
-    fit_col = next((i for i, h in enumerate(data_headers) if f'm{model_idx}_fit' in h), None)
-    res_col = next((i for i, h in enumerate(data_headers) if f'm{model_idx}_res' in h), None)
+    
+    # Find fit/res columns using the model's column prefix
+    fit_col = None
+    res_col = None
+    if col_prefix:
+        fit_col = next((i for i, h in enumerate(data_headers) if f'{col_prefix.lower()}_fit' in h), None)
+        res_col = next((i for i, h in enumerate(data_headers) if f'{col_prefix.lower()}_res' in h), None)
     
     x, y, fit, res = [], [], [], []
     for row in data[1:summary_idx]:
@@ -122,29 +143,22 @@ def process_sheet(name, data):
             if xv is not None:
                 x.append(xv)
                 y.append(float(row[y_col]) if row[y_col] else None)
-                fit.append(float(row[fit_col]) if fit_col and row[fit_col] else None)
-                res.append(float(row[res_col]) if res_col and row[res_col] else None)
+                fit.append(float(row[fit_col]) if fit_col is not None and row[fit_col] else None)
+                res.append(float(row[res_col]) if res_col is not None and row[res_col] else None)
         except:
             pass
     
-    params = {}
-    if param_col and best_row[param_col]:
-        for part in str(best_row[param_col]).split(','):
-            if '=' in part:
-                k, v = part.split('=', 1)
-                try:
-                    params[k.strip()] = float(v.strip())
-                except:
-                    params[k.strip()] = v.strip()
+    # Get diffusion coefficient directly from dedicated column
+    diff_coef = best_row[diff_col] if diff_col is not None else None
     
-    diff_coef = params.get('F') or params.get('D') or next(iter(params.values()), None)
+    # Get formula
+    formula = best_row[formula_col] if formula_col is not None else ''
     
     return {
         'name': name,
-        'model': best_row[name_col] if name_col else 'Unknown',
-        'formula': best_row[formula_col] if formula_col else '',
+        'model': model_name,
+        'formula': formula,
         'r2': best_r2,
-        'params': params,
         'diff_coef': diff_coef,
         'x': x, 'y': y, 'fit': fit, 'res': res
     }
