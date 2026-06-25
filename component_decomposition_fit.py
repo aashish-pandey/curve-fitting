@@ -167,7 +167,10 @@ def fit_dosy(
             found = {}
             for cell in row:
                 if cell.value is None: continue
-                label = str(cell.value).strip().lower()
+                raw = cell.value
+                if isinstance(raw, (list, tuple)): raw = raw[0] if raw else None
+                if raw is None: continue
+                label = str(raw).strip().lower()
                 if label == xl: found["x"] = cell.column
                 elif label == yl: found["y"] = cell.column
                 elif label == cl: found["c"] = cell.column
@@ -185,7 +188,8 @@ def fit_dosy(
             if bv is None or iv is None: continue
             try:
                 rows_b.append(float(bv)); rows_i.append(float(iv))
-                rows_clip.append(str(cv).strip().lower() if cv else "")
+                if isinstance(cv, (list, tuple)): cv = cv[0] if cv else None
+                rows_clip.append(str(cv).strip().lower() if cv is not None else "")
                 row_nums.append(row[0].row)
             except (ValueError, TypeError): continue
 
@@ -209,29 +213,28 @@ def fit_dosy(
         }
 
         # 5d. write fitted columns G–K ─────────────────────────────────────────
-        FIT_HDRS = ["Fit_All_Mono","Fit_All_Bi","Fit_Yes_Mono","Fit_No_Mono","Fit_No_Bi"]
-        FIT_KEYS = ["all_mono","all_bi","yes_mono","no_mono","no_bi"]
-        MASKS    = [None, None, mask_yes, mask_no, mask_no]   # None = all rows
-        COL_OFF  = 7   # G
+        # For subset fits (yes/no), params are found from the subset but the
+        # equation is evaluated over ALL B_value points.
+        FIT_HDRS   = ["Fit_All_Mono","Fit_All_Bi","Fit_Yes_Mono","Fit_No_Mono","Fit_No_Bi"]
+        FIT_KEYS   = ["all_mono","all_bi","yes_mono","no_mono","no_bi"]
+        FIT_MODELS = [mono, bi, mono, mono, bi]
+        COL_OFF    = 7   # G
 
-        for k, (key, hdr, mask) in enumerate(zip(FIT_KEYS, FIT_HDRS, MASKS)):
+        for k, (key, hdr, model) in enumerate(zip(FIT_KEYS, FIT_HDRS, FIT_MODELS)):
             col = COL_OFF + k
             hcell = ws.cell(row=hrow, column=col)
             sc(hcell, hdr, fill=SUB_FILL, font=B_FONT)
             ws.column_dimensions[get_column_letter(col)].width = 16
 
             if fits[key] is None: continue
-            _, yp, _ = fits[key]
-            # yp is only over the subset; build a lookup keyed by position in subset
-            sub_idx = 0
+            params = fits[key][0]
+            # evaluate fitted equation over ALL B values regardless of subset
+            yp_all = model(b_all, *params)
             for di, rn in enumerate(row_nums):
-                applies = (mask is None) or bool(mask[di])
-                if applies and sub_idx < len(yp):
-                    c = ws.cell(row=rn, column=col)
-                    c.value = round(float(yp[sub_idx]), 8)
-                    c.number_format = "0.00000000"
-                    c.font = N_FONT; c.alignment = CTR
-                    sub_idx += 1
+                c = ws.cell(row=rn, column=col)
+                c.value = round(float(yp_all[di]), 8)
+                c.number_format = "0.00000000"
+                c.font = N_FONT; c.alignment = CTR
 
         # 5e. summary table ────────────────────────────────────────────────────
         last_row = max(row_nums)
