@@ -124,12 +124,9 @@ def fit_dosy(
 
     # ── 3. Excel style helpers ────────────────────────────────────────────────
 
-    HDR_FILL  = PatternFill("solid", fgColor="1F4E79")
-    SUB_FILL  = PatternFill("solid", fgColor="BDD7EE")
-    ROW_FILL  = PatternFill("solid", fgColor="EBF3FB")
-    W_FONT    = Font(name="Arial", bold=True, color="FFFFFF", size=9)
-    B_FONT    = Font(name="Arial", bold=True, color="1F4E79", size=9)
-    N_FONT    = Font(name="Arial", size=9)
+    HDR_FILL  = PatternFill("solid", fgColor="1F4E79")   # single header color, used everywhere
+    W_FONT    = Font(name="Arial", bold=True, color="FFFFFF", size=9)   # header text (white, bold)
+    N_FONT    = Font(name="Arial", size=9)                              # normal data text
     CTR       = Alignment(horizontal="center", vertical="center")
 
     def sc(cell, val, fill=None, font=None, align=CTR, nf=None):
@@ -231,6 +228,14 @@ def fit_dosy(
         yi_sm    = yi_map[y_sm.strip().lower()]
         yi_poly  = yi_map[y_poly.strip().lower()]
 
+        # color the whole existing header row (not just the columns we add later)
+        for col in range(1, ws.max_column + 1):
+            cell = ws.cell(row=hrow, column=col)
+            if cell.value is not None:
+                cell.fill = HDR_FILL
+                cell.font = W_FONT
+                cell.alignment = CTR
+
         # 5b. read data ────────────────────────────────────────────────────────
         row_nums, b_raw, mixed_raw, sm_raw, poly_raw = [], [], [], [], []
         for row in ws.iter_rows(min_row=hrow+1, max_row=ws.max_row):
@@ -275,14 +280,17 @@ def fit_dosy(
         FIT_MODELS = [mono, bi, mono, mono, bi]
         FIT_ROWS   = [row_nums, row_nums, row_nums, row_nums, row_nums]
         FIT_BX     = [b_raw, b_raw, b_raw, b_raw, b_raw]
-        COL_OFF    = 8   # H (leave a gap after the 3 original y columns)
+        # Place output columns safely past every existing column in the sheet
+        # (not a hardcoded offset) so we never overwrite B_value or any other
+        # pre-existing data — this was the bug that clobbered B_value before.
+        COL_OFF = max(ws.max_column, xi, yi_mixed, yi_sm, yi_poly) + 2
 
         key_to_col = {}
         for k, (key, hdr, model, rn_k, bx_k) in enumerate(zip(FIT_KEYS, FIT_HDRS, FIT_MODELS, FIT_ROWS, FIT_BX)):
             col = COL_OFF + k
             key_to_col[key] = col
             hcell = ws.cell(row=hrow, column=col)
-            sc(hcell, hdr, fill=SUB_FILL, font=B_FONT)
+            sc(hcell, hdr, fill=HDR_FILL, font=W_FONT)
             ws.column_dimensions[get_column_letter(col)].width = 16
             if fits[key] is None: continue
             params = fits[key][0]
@@ -297,7 +305,7 @@ def fit_dosy(
                     "sm":    (COL_OFF+6, rn_sm,    i_sm,    "Raw_SM"),
                     "poly":  (COL_OFF+7, rn_poly,  i_poly,  "Raw_Poly")}
         for name, (col, rn_k, iy_k, hdr) in RAW_COLS.items():
-            sc(ws.cell(row=hrow, column=col), hdr, fill=SUB_FILL, font=B_FONT)
+            sc(ws.cell(row=hrow, column=col), hdr, fill=HDR_FILL, font=W_FONT)
             ws.column_dimensions[get_column_letter(col)].width = 14
             for r_, v_ in zip(rn_k, iy_k):
                 c = ws.cell(row=int(r_), column=col)
@@ -314,8 +322,8 @@ def fit_dosy(
            f"Curve Fit Results — {ws.title}", fill=HDR_FILL, font=W_FONT)
         sr += 1
 
-        for ci_, h in enumerate(["Fit","D Coeff(s) [m²/s]","A","R²","Notes"], 1):
-            sc(ws.cell(row=sr, column=ci_), h, fill=SUB_FILL, font=B_FONT)
+        for ci_, h in enumerate(["Fit","Equation","D Coeff(s) [m²/s]","A","R²","Notes"], 1):
+            sc(ws.cell(row=sr, column=ci_), h, fill=HDR_FILL, font=W_FONT)
         sr += 1
 
         def d_val(key, idx):
@@ -326,30 +334,34 @@ def fit_dosy(
             if fits[key] is None: return "—"
             return round(fits[key][2], 6)
 
+        EQ_MONO = "I = A · exp(−D·B)"
+        EQ_BI   = "I = A1·exp(−D1·B) + A2·exp(−D2·B)"
+
         summary_rows = [
-            ("Mixed → Mono",    d_val("mixed_mono",1), d_val("mixed_mono",0), r2_val("mixed_mono"), ""),
-            ("Mixed → Bi (D1)", d_val("mixed_bi",1),   d_val("mixed_bi",0),   r2_val("mixed_bi"),  "fast component"),
-            ("Mixed → Bi (D2)", d_val("mixed_bi",3),   d_val("mixed_bi",2),   r2_val("mixed_bi"),  "slow component"),
-            ("SM → Mono",       d_val("sm_mono",1),    d_val("sm_mono",0),    r2_val("sm_mono"),   ""),
-            ("Poly → Mono",     d_val("poly_mono",1),  d_val("poly_mono",0),  r2_val("poly_mono"), ""),
-            ("Poly → Bi (D1)",  d_val("poly_bi",1),    d_val("poly_bi",0),    r2_val("poly_bi"),   "fast component"),
-            ("Poly → Bi (D2)",  d_val("poly_bi",3),    d_val("poly_bi",2),    r2_val("poly_bi"),   "slow component"),
+            ("Mixed → Mono",    EQ_MONO, d_val("mixed_mono",1), d_val("mixed_mono",0), r2_val("mixed_mono"), ""),
+            ("Mixed → Bi (D1)", EQ_BI,   d_val("mixed_bi",1),   d_val("mixed_bi",0),   r2_val("mixed_bi"),  "fast component"),
+            ("Mixed → Bi (D2)", EQ_BI,   d_val("mixed_bi",3),   d_val("mixed_bi",2),   r2_val("mixed_bi"),  "slow component"),
+            ("SM → Mono",       EQ_MONO, d_val("sm_mono",1),    d_val("sm_mono",0),    r2_val("sm_mono"),   ""),
+            ("Poly → Mono",     EQ_MONO, d_val("poly_mono",1),  d_val("poly_mono",0),  r2_val("poly_mono"), ""),
+            ("Poly → Bi (D1)",  EQ_BI,   d_val("poly_bi",1),    d_val("poly_bi",0),    r2_val("poly_bi"),   "fast component"),
+            ("Poly → Bi (D2)",  EQ_BI,   d_val("poly_bi",3),    d_val("poly_bi",2),    r2_val("poly_bi"),   "slow component"),
         ]
 
         for row_data in summary_rows:
             for ci_, val in enumerate(row_data, 1):
                 cell = ws.cell(row=sr, column=ci_)
                 if isinstance(val, float):
-                    sc(cell, val, fill=ROW_FILL, nf="0.00000E+00")
+                    sc(cell, val, fill=None, nf="0.00000E+00")
                 else:
-                    sc(cell, val, fill=ROW_FILL)
+                    sc(cell, val, fill=None)
             sr += 1
 
         ws.column_dimensions["A"].width = 18
-        ws.column_dimensions["B"].width = 22
-        ws.column_dimensions["C"].width = 14
+        ws.column_dimensions["B"].width = 32
+        ws.column_dimensions["C"].width = 18
         ws.column_dimensions["D"].width = 12
-        ws.column_dimensions["E"].width = 18
+        ws.column_dimensions["E"].width = 10
+        ws.column_dimensions["F"].width = 18
 
         # 5f. overlay charts — 4 combos: Mixed(Mono/Bi) x SM(Mono) x Poly(Mono/Bi) ──
         dmin, dmax = int(row_nums.min()), int(row_nums.max())
@@ -374,29 +386,9 @@ def fit_dosy(
         ]
 
         CHART_ROW_SPACING = 26
-        chart_anchor_row = sr + 2
+        overlay_anchor_row = sr + 2
 
-        # 5f-1. individual charts — one per fit, raw (trimmed) points + full-range fit line
-        individual_configs = [
-            ("Mixed — Mono-Exp", "mixed_mono", RAW_COLS["mixed"][0], "4472C4", "circle"),
-            ("Mixed — Bi-Exp",   "mixed_bi",   RAW_COLS["mixed"][0], "4472C4", "circle"),
-            ("SM — Mono-Exp",    "sm_mono",    RAW_COLS["sm"][0],    "70AD47", "triangle"),
-            ("Poly — Mono-Exp",  "poly_mono",  RAW_COLS["poly"][0],  "ED7D31", "diamond"),
-            ("Poly — Bi-Exp",    "poly_bi",    RAW_COLS["poly"][0],  "ED7D31", "diamond"),
-        ]
-        placed_ind = 0
-        for title, key, raw_col, color, symbol in individual_configs:
-            if fits[key] is None:
-                print(f"    [SKIP CHART] {title}: fit failed")
-                continue
-            yref_data = Reference(ws, min_col=raw_col, min_row=dmin, max_row=dmax)
-            yref_fit  = Reference(ws, min_col=key_to_col[key], min_row=dmin, max_row=dmax)
-            anchor = f"A{chart_anchor_row + placed_ind*CHART_ROW_SPACING}"
-            make_scatter(ws, title, xref_all, yref_data, yref_fit, color, symbol, anchor)
-            placed_ind += 1
-
-        # 5f-2. overlay charts — 4 combos
-        overlay_anchor_row = chart_anchor_row + placed_ind*CHART_ROW_SPACING
+        # 5f-1. overlay charts (multi-curve) first — 4 combos, stacked in column A
         placed = 0
         for title, keys in overlay_combos:
             if any(fits[k_] is None for k_ in keys):
@@ -406,6 +398,28 @@ def fit_dosy(
             anchor = f"A{overlay_anchor_row + placed*CHART_ROW_SPACING}"
             make_overlay(ws, title, xref_all, curve_defs, raw_defs, anchor)
             placed += 1
+
+        # 5f-2. individual charts second — one per fit, 3 rows x 2 columns grid
+        individual_configs = [
+            ("Mixed — Mono-Exp", "mixed_mono", RAW_COLS["mixed"][0], "4472C4", "circle"),
+            ("Mixed — Bi-Exp",   "mixed_bi",   RAW_COLS["mixed"][0], "4472C4", "circle"),
+            ("SM — Mono-Exp",    "sm_mono",    RAW_COLS["sm"][0],    "70AD47", "triangle"),
+            ("Poly — Mono-Exp",  "poly_mono",  RAW_COLS["poly"][0],  "ED7D31", "diamond"),
+            ("Poly — Bi-Exp",    "poly_bi",    RAW_COLS["poly"][0],  "ED7D31", "diamond"),
+        ]
+        individual_anchor_row = overlay_anchor_row + placed*CHART_ROW_SPACING
+        GRID_COLS = ["A", "J"]   # 2 columns per row of the grid
+        placed_ind = 0
+        for title, key, raw_col, color, symbol in individual_configs:
+            if fits[key] is None:
+                print(f"    [SKIP CHART] {title}: fit failed")
+                continue
+            yref_data = Reference(ws, min_col=raw_col, min_row=dmin, max_row=dmax)
+            yref_fit  = Reference(ws, min_col=key_to_col[key], min_row=dmin, max_row=dmax)
+            grid_row, grid_col = divmod(placed_ind, 2)
+            anchor = f"{GRID_COLS[grid_col]}{individual_anchor_row + grid_row*CHART_ROW_SPACING}"
+            make_scatter(ws, title, xref_all, yref_data, yref_fit, color, symbol, anchor)
+            placed_ind += 1
 
         print(f"  [OK] {ws.title} | N={len(b_raw)} mixed_kept={len(b_mixed)} "
               f"sm_kept={len(b_sm)} poly_kept={len(b_poly)} | "
