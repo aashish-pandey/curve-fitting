@@ -9,20 +9,27 @@ Usage
     fit_dosy("output")   # scans output/ for *_component_Decomposition*.xlsx
 
 For every sheet in every matching file the function:
-  • reads  B_value (x),  I_norm_mixed, I_norm_sm, I_norm_poly (y's)
-  • for each y-column independently: sorts by B_value ascending, discards
-    leading rows where the value is < 1, fits start from the first row >= 1
+  • reads  B_value (x),  I_norm_mixed, I_norm_sm, I_norm_poly (y's), in the
+    ORIGINAL row order of the sheet (no sorting by B_value)
+  • for each y-column independently: walking down the sheet in its existing
+    row order, discards leading rows where the value is < 1; fitting starts
+    from the first row >= 1
   • fits 5 curves:
       [1] I_norm_mixed → mono-exp → D_mixed_mono
       [2] I_norm_mixed → bi-exp   → D1_mixed_bi, D2_mixed_bi
       [3] I_norm_sm    → mono-exp → D_sm_mono
       [4] I_norm_poly  → mono-exp → D_poly_mono
       [5] I_norm_poly  → bi-exp   → D1_poly_bi, D2_poly_bi
+  • params come from each column's trimmed (>=1) subset, but the fitted
+    equation is evaluated ("extrapolated") back across ALL B_values / rows,
+    so every fit column has a value for every row even though the fit only
+    "saw" the trimmed subset during optimization
   • appends fitted-value columns and per-column trimmed raw-value columns
   • writes a results summary table below the data
-  • embeds 4 overlay ScatterCharts (all Mixed-choice x SM-Mono x Poly-choice
-    combinations = 2 x 1 x 2), each with 3 raw point series (different
-    marker shape per column) + 3 fit lines
+  • embeds 5 individual ScatterCharts (one per fit: raw trimmed points +
+    full-range fit line), then 4 overlay ScatterCharts (all Mixed-choice x
+    SM-Mono x Poly-choice combinations = 2 x 1 x 2), each with 3 raw point
+    series (different marker shape per column) + 3 fit lines
   • saves back to the same file
 
 Dependencies: math, os, glob  (stdlib)  +  numpy  +  openpyxl
@@ -132,7 +139,32 @@ def fit_dosy(
         cell.alignment = align
         if nf: cell.number_format = nf
 
-    # ── 4. Overlay chart builder ────────────────────────────────────────────
+    # ── 4. Chart builders ────────────────────────────────────────────────────
+
+    def make_scatter(ws, title, xref, yref_data, yref_fit, marker_color, marker_symbol, anchor):
+        ch = ScatterChart(); ch.scatterStyle = "lineMarker"
+        ch.title = title; ch.width = 14; ch.height = 10
+        ch.x_axis.title = x_col; ch.y_axis.title = "I_norm"
+        ch.x_axis.numFmt = "0.00E+00"; ch.style = 2
+        ch.x_axis.delete = False; ch.y_axis.delete = False
+        ch.x_axis.majorTickMark = "out"; ch.y_axis.majorTickMark = "out"
+        ch.x_axis.majorGridlines = ChartLines()
+
+        raw = Series(yref_data, xref, title="Data")
+        raw.marker.symbol = marker_symbol; raw.marker.size = 5
+        raw.marker.graphicalProperties.solidFill = marker_color
+        raw.graphicalProperties.line.noFill = True
+        ch.series.append(raw)
+
+        fit = Series(yref_fit, xref, title="Fit")
+        fit.marker.symbol = "none"
+        fit.graphicalProperties.line.solidFill = "FF0000"
+        fit.graphicalProperties.line.width = 18000
+        ch.series.append(fit)
+
+        ws.add_chart(ch, anchor)
+
+    # ── 4b. Overlay chart builder ────────────────────────────────────────────
 
     def make_overlay(ws, title, xref, curve_defs, raw_defs, anchor):
         """
@@ -215,14 +247,11 @@ def fit_dosy(
 
         row_nums = np.array(row_nums)
         b_raw = np.array(b_raw)
-        order = np.argsort(b_raw)  # ascending B_value
 
         def trim(y_arr):
-            """Sort by ascending B, discard leading rows where y < 1."""
-            y_sorted = y_arr[order]
-            start = int(np.argmax(y_sorted >= 1))
-            keep = order[start:]
-            return row_nums[keep], b_raw[keep], y_arr[keep]
+            """Walk rows in original sheet order; discard leading rows where y < 1."""
+            start = int(np.argmax(y_arr >= 1))
+            return row_nums[start:], b_raw[start:], y_arr[start:]
 
         rn_mixed, b_mixed, i_mixed = trim(np.array(mixed_raw))
         rn_sm,    b_sm,    i_sm    = trim(np.array(sm_raw))
@@ -346,18 +375,41 @@ def fit_dosy(
 
         CHART_ROW_SPACING = 26
         chart_anchor_row = sr + 2
+
+        # 5f-1. individual charts — one per fit, raw (trimmed) points + full-range fit line
+        individual_configs = [
+            ("Mixed — Mono-Exp", "mixed_mono", RAW_COLS["mixed"][0], "4472C4", "circle"),
+            ("Mixed — Bi-Exp",   "mixed_bi",   RAW_COLS["mixed"][0], "4472C4", "circle"),
+            ("SM — Mono-Exp",    "sm_mono",    RAW_COLS["sm"][0],    "70AD47", "triangle"),
+            ("Poly — Mono-Exp",  "poly_mono",  RAW_COLS["poly"][0],  "ED7D31", "diamond"),
+            ("Poly — Bi-Exp",    "poly_bi",    RAW_COLS["poly"][0],  "ED7D31", "diamond"),
+        ]
+        placed_ind = 0
+        for title, key, raw_col, color, symbol in individual_configs:
+            if fits[key] is None:
+                print(f"    [SKIP CHART] {title}: fit failed")
+                continue
+            yref_data = Reference(ws, min_col=raw_col, min_row=dmin, max_row=dmax)
+            yref_fit  = Reference(ws, min_col=key_to_col[key], min_row=dmin, max_row=dmax)
+            anchor = f"A{chart_anchor_row + placed_ind*CHART_ROW_SPACING}"
+            make_scatter(ws, title, xref_all, yref_data, yref_fit, color, symbol, anchor)
+            placed_ind += 1
+
+        # 5f-2. overlay charts — 4 combos
+        overlay_anchor_row = chart_anchor_row + placed_ind*CHART_ROW_SPACING
         placed = 0
         for title, keys in overlay_combos:
             if any(fits[k_] is None for k_ in keys):
                 print(f"    [SKIP OVERLAY] {title}: missing fit(s)")
                 continue
             curve_defs = [(key_to_col[k_], KEY_LABEL[k_], KEY_COLOR[k_]) for k_ in keys]
-            anchor = f"A{chart_anchor_row + placed*CHART_ROW_SPACING}"
+            anchor = f"A{overlay_anchor_row + placed*CHART_ROW_SPACING}"
             make_overlay(ws, title, xref_all, curve_defs, raw_defs, anchor)
             placed += 1
 
         print(f"  [OK] {ws.title} | N={len(b_raw)} mixed_kept={len(b_mixed)} "
-              f"sm_kept={len(b_sm)} poly_kept={len(b_poly)} | overlays={placed}")
+              f"sm_kept={len(b_sm)} poly_kept={len(b_poly)} | "
+              f"individual={placed_ind} overlays={placed}")
 
     # ── 6. File discovery & main loop ─────────────────────────────────────────
 
