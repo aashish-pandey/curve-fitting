@@ -34,6 +34,7 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 from openpyxl.chart import ScatterChart, Reference, Series
+from openpyxl.chart.axis import ChartLines
 
 
 def fit_dosy(
@@ -142,6 +143,9 @@ def fit_dosy(
         ch.title = title; ch.width = 14; ch.height = 10
         ch.x_axis.title = x_col; ch.y_axis.title = y_col
         ch.x_axis.numFmt = "0.00E+00"; ch.style = 2
+        ch.x_axis.delete = False; ch.y_axis.delete = False
+        ch.x_axis.majorTickMark = "out"; ch.y_axis.majorTickMark = "out"
+        ch.x_axis.majorGridlines = ChartLines()
 
         raw = Series(yref_data, xref, title="Data")
         raw.marker.symbol = "circle"; raw.marker.size = 4
@@ -158,13 +162,32 @@ def fit_dosy(
 
         ws.add_chart(ch, anchor)
 
-    def make_overlay(ws, title, xref, curve_defs, anchor):
-        """curve_defs: list of (col_idx, label, hex_color) — one line per fit, no markers."""
+    def make_overlay(ws, title, xref, curve_defs, raw_defs, anchor):
+        """
+        curve_defs: list of (col_idx, label, hex_color) — one LINE per fit, no markers.
+        raw_defs:   list of (col_idx, label, hex_color) — one MARKER-only series per
+                    raw data subset (e.g. Yes/No), no connecting line. Columns are
+                    expected to contain blanks for rows outside that subset, so the
+                    markers only appear at the correct B_value positions.
+        """
         ch = ScatterChart(); ch.scatterStyle = "lineMarker"
         ch.title = title; ch.width = 16; ch.height = 10
         ch.x_axis.title = x_col; ch.y_axis.title = y_col
         ch.x_axis.numFmt = "0.00E+00"; ch.style = 2
+        ch.x_axis.delete = False; ch.y_axis.delete = False
+        ch.x_axis.majorTickMark = "out"; ch.y_axis.majorTickMark = "out"
+        ch.x_axis.majorGridlines = ChartLines()
 
+        # raw data points first (drawn behind the fit lines)
+        for col_idx, label, color in raw_defs:
+            yref = Reference(ws, min_col=col_idx, min_row=xref.min_row, max_row=xref.max_row)
+            s = Series(yref, xref, title=label)
+            s.marker.symbol = "circle"; s.marker.size = 5
+            s.marker.graphicalProperties.solidFill = color
+            s.graphicalProperties.line.noFill = True
+            ch.series.append(s)
+
+        # fit lines on top
         for col_idx, label, color in curve_defs:
             yref = Reference(ws, min_col=col_idx, min_row=xref.min_row, max_row=xref.max_row)
             s = Series(yref, xref, title=label)
@@ -178,6 +201,11 @@ def fit_dosy(
     # ── 5. Per-sheet processing ───────────────────────────────────────────────
 
     def process_sheet(ws, fname):
+        # Clear charts from any previous run of this script on this file — otherwise
+        # re-running on an already-processed workbook stacks a new chart set on top
+        # of the old one at nearly the same anchors, which looks like overlap.
+        ws._charts = []
+
         # 5a. locate header row ───────────────────────────────────────────────
         xl = x_col.strip().lower()
         yl = y_col.strip().lower()
@@ -259,6 +287,28 @@ def fit_dosy(
                 c.number_format = "0.00000000"
                 c.font = N_FONT; c.alignment = CTR
 
+        # 5d-2. raw Yes/No value columns (for overlay scatter markers) ─────────
+        # Rows aren't grouped by clip status, so each row gets its I_norm value
+        # written only into the matching column; the other column stays blank.
+        # A contiguous Reference over these columns then plots markers only at
+        # the rows that actually belong to that subset.
+        col_yes_raw = COL_OFF + 5   # L
+        col_no_raw  = COL_OFF + 6   # M
+        sc(ws.cell(row=hrow, column=col_yes_raw), "Yes_Raw_I", fill=SUB_FILL, font=B_FONT)
+        sc(ws.cell(row=hrow, column=col_no_raw),  "No_Raw_I",  fill=SUB_FILL, font=B_FONT)
+        ws.column_dimensions[get_column_letter(col_yes_raw)].width = 14
+        ws.column_dimensions[get_column_letter(col_no_raw)].width = 14
+
+        for di, rn in enumerate(row_nums):
+            target_col = col_yes_raw if rows_clip[di] == "yes" else (
+                         col_no_raw if rows_clip[di] == "no" else None)
+            if target_col is None:
+                continue
+            c = ws.cell(row=rn, column=target_col)
+            c.value = round(float(i_all[di]), 8)
+            c.number_format = "0.00000000"
+            c.font = N_FONT; c.alignment = CTR
+
         # 5e. summary table ────────────────────────────────────────────────────
         last_row = max(row_nums)
         sr = last_row + 3
@@ -321,6 +371,10 @@ def fit_dosy(
         def col_ref(col_idx):
             return Reference(ws, min_col=col_idx, min_row=dmin, max_row=dmax)
 
+        # Chart height is fixed at 10cm; default Excel row height (~15pt ≈ 0.53cm)
+        # means ~19 rows are needed just to clear one chart's height. 18 rows was
+        # too tight and caused consecutive charts to overlap — use 26 for a clean gap.
+        CHART_ROW_SPACING = 26
         chart_anchor_row = sr + 2
         chart_configs = [
             ("All Data — Mono-Exp",   xref_all, yref_raw, col_ref(COL_OFF+0)),
@@ -330,7 +384,7 @@ def fit_dosy(
             ("Clipped=No  — Bi-Exp",  xref_all, yref_raw, col_ref(COL_OFF+4)),
         ]
         for k, (title, xr, yr, fr) in enumerate(chart_configs):
-            anchor = f"A{chart_anchor_row + k*18}"
+            anchor = f"A{chart_anchor_row + k*CHART_ROW_SPACING}"
             make_scatter(ws, title, xr, yr, fr, anchor)
 
         # 5g. overlay charts — all 2×1×2 combinations of subset-fit choices ───
@@ -355,15 +409,21 @@ def fit_dosy(
             ("Overlay: All-Bi + Yes-Mono + No-Bi",     ["all_bi",   "yes_mono", "no_bi"]),
         ]
 
-        overlay_anchor_row = chart_anchor_row + len(chart_configs) * 18
+        # raw Yes/No data-point markers, shown on every overlay plot
+        raw_defs = [
+            (col_yes_raw, "Yes-Raw", "70AD47"),  # green
+            (col_no_raw,  "No-Raw",  "ED7D31"),  # orange
+        ]
+
+        overlay_anchor_row = chart_anchor_row + len(chart_configs) * CHART_ROW_SPACING
         placed = 0
         for title, keys in overlay_combos:
             if any(fits[k_] is None for k_ in keys):
                 print(f"    [SKIP OVERLAY] {title}: missing fit(s)")
                 continue
             curve_defs = [(key_to_col[k_], KEY_LABEL[k_], KEY_COLOR[k_]) for k_ in keys]
-            anchor = f"A{overlay_anchor_row + placed*18}"
-            make_overlay(ws, title, xref_all, curve_defs, anchor)
+            anchor = f"A{overlay_anchor_row + placed*CHART_ROW_SPACING}"
+            make_overlay(ws, title, xref_all, curve_defs, raw_defs, anchor)
             placed += 1
 
         print(f"  [OK] {ws.title} | N={len(b_all)} yes={mask_yes.sum()} no={mask_no.sum()} | overlays={placed}")
