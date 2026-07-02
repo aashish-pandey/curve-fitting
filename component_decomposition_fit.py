@@ -238,11 +238,14 @@ def fit_dosy(
         }
 
         # 5d. write fitted columns + trimmed raw columns ────────────────────────
+        # Params are fit on each column's trimmed (>=1) subset, but the fitted
+        # equation is then evaluated over ALL B_values / ALL rows so the curve
+        # spans the full plot range, not just the trimmed window.
         FIT_HDRS   = ["Fit_Mixed_Mono","Fit_Mixed_Bi","Fit_SM_Mono","Fit_Poly_Mono","Fit_Poly_Bi"]
         FIT_KEYS   = ["mixed_mono","mixed_bi","sm_mono","poly_mono","poly_bi"]
         FIT_MODELS = [mono, bi, mono, mono, bi]
-        FIT_ROWS   = [rn_mixed, rn_mixed, rn_sm, rn_poly, rn_poly]
-        FIT_BX     = [b_mixed, b_mixed, b_sm, b_poly, b_poly]
+        FIT_ROWS   = [row_nums, row_nums, row_nums, row_nums, row_nums]
+        FIT_BX     = [b_raw, b_raw, b_raw, b_raw, b_raw]
         COL_OFF    = 8   # H (leave a gap after the 3 original y columns)
 
         key_to_col = {}
