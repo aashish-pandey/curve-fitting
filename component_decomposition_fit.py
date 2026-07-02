@@ -6,23 +6,23 @@ Fits mono/bi-exponential decay curves to DOSY NMR decomposition Excel sheets.
 Usage
 -----
     from dosy_curve_fit import fit_dosy
-    fit_dosy("output")                        # scans output/ for *_component_Decomposition*.xlsx
-    fit_dosy("output", x_col="B_value", y_col="I_norm", clipped_col="clipped")
+    fit_dosy("output")   # scans output/ for *_component_Decomposition*.xlsx
 
 For every sheet in every matching file the function:
-  • reads  B_value (x),  I_norm (y),  clipped (yes/no)
+  • reads  B_value (x),  I_norm_mixed, I_norm_sm, I_norm_poly (y's)
+  • for each y-column independently: sorts by B_value ascending, discards
+    leading rows where the value is < 1, fits start from the first row >= 1
   • fits 5 curves:
-      [1] All data    → mono-exp          → D_all_mono
-      [2] All data    → bi-exp            → D1_all_bi,  D2_all_bi
-      [3] Clipped=Yes → mono-exp only     → D_yes_mono
-      [4] Clipped=No  → mono-exp          → D_no_mono
-      [5] Clipped=No  → bi-exp            → D1_no_bi,   D2_no_bi
-  • appends fitted-value columns (G–K) in the same rows as the data
+      [1] I_norm_mixed → mono-exp → D_mixed_mono
+      [2] I_norm_mixed → bi-exp   → D1_mixed_bi, D2_mixed_bi
+      [3] I_norm_sm    → mono-exp → D_sm_mono
+      [4] I_norm_poly  → mono-exp → D_poly_mono
+      [5] I_norm_poly  → bi-exp   → D1_poly_bi, D2_poly_bi
+  • appends fitted-value columns and per-column trimmed raw-value columns
   • writes a results summary table below the data
-  • embeds one openpyxl ScatterChart per fit (5 charts total) below the summary
-  • embeds 4 OVERLAY ScatterCharts, each combining one fit from All (Mono/Bi),
-    the single Yes-Mono fit, and one fit from No (Mono/Bi) — i.e. all 2×1×2
-    combinations of subset-fit choices — below the individual charts
+  • embeds 4 overlay ScatterCharts (all Mixed-choice x SM-Mono x Poly-choice
+    combinations = 2 x 1 x 2), each with 3 raw point series (different
+    marker shape per column) + 3 fit lines
   • saves back to the same file
 
 Dependencies: math, os, glob  (stdlib)  +  numpy  +  openpyxl
@@ -39,10 +39,11 @@ from openpyxl.chart.axis import ChartLines
 
 def fit_dosy(
     output_folder: str = "output",
-    x_col:         str = "B_value",
-    y_col:         str = "I_norm",
-    clipped_col:   str = "clipped",
+    x_col:  str = "B_value",
+    y_cols: tuple = ("I_norm_mixed", "I_norm_sm", "I_norm_poly"),
 ) -> None:
+
+    y_mixed, y_sm, y_poly = y_cols
 
     # ── 1. Models ────────────────────────────────────────────────────────────
 
@@ -131,63 +132,30 @@ def fit_dosy(
         cell.alignment = align
         if nf: cell.number_format = nf
 
-    def fp(v):
-        if not isinstance(v, float): return str(v)
-        if math.isnan(v) or math.isinf(v): return str(v)
-        return f"{v:.4e}" if (abs(v) < 1e-3 or abs(v) > 9999) else f"{v:.6f}"
-
-    # ── 4. Chart builders ─────────────────────────────────────────────────────
-
-    def make_scatter(ws, title, xref, yref_data, yref_fit, anchor):
-        ch = ScatterChart(); ch.scatterStyle = "smoothMarker"
-        ch.title = title; ch.width = 14; ch.height = 10
-        ch.x_axis.title = x_col; ch.y_axis.title = y_col
-        ch.x_axis.numFmt = "0.00E+00"; ch.style = 2
-        ch.x_axis.delete = False; ch.y_axis.delete = False
-        ch.x_axis.majorTickMark = "out"; ch.y_axis.majorTickMark = "out"
-        ch.x_axis.majorGridlines = ChartLines()
-
-        raw = Series(yref_data, xref, title="Data")
-        raw.marker.symbol = "circle"; raw.marker.size = 4
-        raw.marker.graphicalProperties.solidFill = "4472C4"
-        raw.graphicalProperties.line.noFill = True
-        ch.series.append(raw)
-
-        if yref_fit:
-            fit = Series(yref_fit, xref, title="Fit")
-            fit.marker.symbol = "none"
-            fit.graphicalProperties.line.solidFill = "FF0000"
-            fit.graphicalProperties.line.width = 18000
-            ch.series.append(fit)
-
-        ws.add_chart(ch, anchor)
+    # ── 4. Overlay chart builder ────────────────────────────────────────────
 
     def make_overlay(ws, title, xref, curve_defs, raw_defs, anchor):
         """
-        curve_defs: list of (col_idx, label, hex_color) — one LINE per fit, no markers.
-        raw_defs:   list of (col_idx, label, hex_color) — one MARKER-only series per
-                    raw data subset (e.g. Yes/No), no connecting line. Columns are
-                    expected to contain blanks for rows outside that subset, so the
-                    markers only appear at the correct B_value positions.
+        curve_defs: list of (col_idx, label, hex_color) — one LINE per fit.
+        raw_defs:   list of (col_idx, label, hex_color, marker_symbol) —
+                    one MARKER-only series per raw column (blanks skipped).
         """
         ch = ScatterChart(); ch.scatterStyle = "lineMarker"
         ch.title = title; ch.width = 16; ch.height = 10
-        ch.x_axis.title = x_col; ch.y_axis.title = y_col
+        ch.x_axis.title = x_col; ch.y_axis.title = "I_norm"
         ch.x_axis.numFmt = "0.00E+00"; ch.style = 2
         ch.x_axis.delete = False; ch.y_axis.delete = False
         ch.x_axis.majorTickMark = "out"; ch.y_axis.majorTickMark = "out"
         ch.x_axis.majorGridlines = ChartLines()
 
-        # raw data points first (drawn behind the fit lines)
-        for col_idx, label, color in raw_defs:
+        for col_idx, label, color, symbol in raw_defs:
             yref = Reference(ws, min_col=col_idx, min_row=xref.min_row, max_row=xref.max_row)
             s = Series(yref, xref, title=label)
-            s.marker.symbol = "circle"; s.marker.size = 5
+            s.marker.symbol = symbol; s.marker.size = 6
             s.marker.graphicalProperties.solidFill = color
             s.graphicalProperties.line.noFill = True
             ch.series.append(s)
 
-        # fit lines on top
         for col_idx, label, color in curve_defs:
             yref = Reference(ws, min_col=col_idx, min_row=xref.min_row, max_row=xref.max_row)
             s = Series(yref, xref, title=label)
@@ -201,119 +169,114 @@ def fit_dosy(
     # ── 5. Per-sheet processing ───────────────────────────────────────────────
 
     def process_sheet(ws, fname):
-        # Clear charts from any previous run of this script on this file — otherwise
-        # re-running on an already-processed workbook stacks a new chart set on top
-        # of the old one at nearly the same anchors, which looks like overlap.
         ws._charts = []
 
         # 5a. locate header row ───────────────────────────────────────────────
         xl = x_col.strip().lower()
-        yl = y_col.strip().lower()
-        cl = clipped_col.strip().lower()
-        hrow = xi = yi = ci = None
+        yls = [c.strip().lower() for c in (y_mixed, y_sm, y_poly)]
+        hrow = xi = None
+        yi_map = {}
         for row in ws.iter_rows(min_row=1, max_row=min(20, ws.max_row)):
-            found = {}
+            found_x = None
+            found_y = {}
             for cell in row:
                 if cell.value is None: continue
                 raw = cell.value
                 if isinstance(raw, (list, tuple)): raw = raw[0] if raw else None
                 if raw is None: continue
                 label = str(raw).strip().lower()
-                if label == xl: found["x"] = cell.column
-                elif label == yl: found["y"] = cell.column
-                elif label == cl: found["c"] = cell.column
-            if len(found) == 3:
+                if label == xl: found_x = cell.column
+                elif label in yls: found_y[label] = cell.column
+            if found_x is not None and len(found_y) == 3:
                 hrow = row[0].row
-                xi, yi, ci = found["x"], found["y"], found["c"]
+                xi = found_x
+                yi_map = found_y
                 break
         if hrow is None:
             print(f"  [SKIP] {ws.title}: headers not found"); return
 
+        yi_mixed = yi_map[y_mixed.strip().lower()]
+        yi_sm    = yi_map[y_sm.strip().lower()]
+        yi_poly  = yi_map[y_poly.strip().lower()]
+
         # 5b. read data ────────────────────────────────────────────────────────
-        rows_b, rows_i, rows_clip, row_nums = [], [], [], []
+        row_nums, b_raw, mixed_raw, sm_raw, poly_raw = [], [], [], [], []
         for row in ws.iter_rows(min_row=hrow+1, max_row=ws.max_row):
-            bv = row[xi-1].value; iv = row[yi-1].value; cv = row[ci-1].value
-            if bv is None or iv is None: continue
-            try:
-                rows_b.append(float(bv)); rows_i.append(float(iv))
-                if isinstance(cv, (list, tuple)): cv = cv[0] if cv else None
-                rows_clip.append(str(cv).strip().lower() if cv is not None else "")
-                row_nums.append(row[0].row)
-            except (ValueError, TypeError): continue
+            bv = row[xi-1].value
+            mv = row[yi_mixed-1].value
+            sv = row[yi_sm-1].value
+            pv = row[yi_poly-1].value
+            if bv is None: continue
+            row_nums.append(row[0].row)
+            b_raw.append(float(bv))
+            mixed_raw.append(float(mv) if mv is not None else np.nan)
+            sm_raw.append(float(sv) if sv is not None else np.nan)
+            poly_raw.append(float(pv) if pv is not None else np.nan)
 
-        if len(rows_b) < 4:
-            print(f"  [SKIP] {ws.title}: only {len(rows_b)} rows"); return
+        row_nums = np.array(row_nums)
+        b_raw = np.array(b_raw)
+        order = np.argsort(b_raw)  # ascending B_value
 
-        b_all = np.array(rows_b); i_all = np.array(rows_i)
-        clip  = np.array(rows_clip)
+        def trim(y_arr):
+            """Sort by ascending B, discard leading rows where y < 1."""
+            y_sorted = y_arr[order]
+            start = int(np.argmax(y_sorted >= 1))
+            keep = order[start:]
+            return row_nums[keep], b_raw[keep], y_arr[keep]
 
-        mask_yes = clip == "yes"; mask_no = clip == "no"
-        b_yes, i_yes = b_all[mask_yes], i_all[mask_yes]
-        b_no,  i_no  = b_all[mask_no],  i_all[mask_no]
+        rn_mixed, b_mixed, i_mixed = trim(np.array(mixed_raw))
+        rn_sm,    b_sm,    i_sm    = trim(np.array(sm_raw))
+        rn_poly,  b_poly,  i_poly  = trim(np.array(poly_raw))
 
         # 5c. run fits ─────────────────────────────────────────────────────────
         fits = {
-            "all_mono": fit_curve(mono, warm_p0_mono(b_all, i_all), b_all, i_all),
-            "all_bi":   fit_curve(bi,   warm_p0_bi(b_all, i_all),   b_all, i_all),
-            "yes_mono": fit_curve(mono, warm_p0_mono(b_yes, i_yes), b_yes, i_yes),
-            "no_mono":  fit_curve(mono, warm_p0_mono(b_no,  i_no),  b_no,  i_no),
-            "no_bi":    fit_curve(bi,   warm_p0_bi(b_no,  i_no),    b_no,  i_no),
+            "mixed_mono": fit_curve(mono, warm_p0_mono(b_mixed, i_mixed), b_mixed, i_mixed),
+            "mixed_bi":   fit_curve(bi,   warm_p0_bi(b_mixed, i_mixed),   b_mixed, i_mixed),
+            "sm_mono":    fit_curve(mono, warm_p0_mono(b_sm, i_sm),       b_sm, i_sm),
+            "poly_mono":  fit_curve(mono, warm_p0_mono(b_poly, i_poly),   b_poly, i_poly),
+            "poly_bi":    fit_curve(bi,   warm_p0_bi(b_poly, i_poly),     b_poly, i_poly),
         }
 
-        # 5d. write fitted columns G–K ─────────────────────────────────────────
-        # For subset fits (yes/no), params are found from the subset but the
-        # equation is evaluated over ALL B_value points.
-        FIT_HDRS   = ["Fit_All_Mono","Fit_All_Bi","Fit_Yes_Mono","Fit_No_Mono","Fit_No_Bi"]
-        FIT_KEYS   = ["all_mono","all_bi","yes_mono","no_mono","no_bi"]
+        # 5d. write fitted columns + trimmed raw columns ────────────────────────
+        FIT_HDRS   = ["Fit_Mixed_Mono","Fit_Mixed_Bi","Fit_SM_Mono","Fit_Poly_Mono","Fit_Poly_Bi"]
+        FIT_KEYS   = ["mixed_mono","mixed_bi","sm_mono","poly_mono","poly_bi"]
         FIT_MODELS = [mono, bi, mono, mono, bi]
-        COL_OFF    = 7   # G
+        FIT_ROWS   = [rn_mixed, rn_mixed, rn_sm, rn_poly, rn_poly]
+        FIT_BX     = [b_mixed, b_mixed, b_sm, b_poly, b_poly]
+        COL_OFF    = 8   # H (leave a gap after the 3 original y columns)
 
-        # key -> column index, used later for overlay charts too
-        key_to_col = {key: COL_OFF + k for k, key in enumerate(FIT_KEYS)}
-
-        for k, (key, hdr, model) in enumerate(zip(FIT_KEYS, FIT_HDRS, FIT_MODELS)):
+        key_to_col = {}
+        for k, (key, hdr, model, rn_k, bx_k) in enumerate(zip(FIT_KEYS, FIT_HDRS, FIT_MODELS, FIT_ROWS, FIT_BX)):
             col = COL_OFF + k
+            key_to_col[key] = col
             hcell = ws.cell(row=hrow, column=col)
             sc(hcell, hdr, fill=SUB_FILL, font=B_FONT)
             ws.column_dimensions[get_column_letter(col)].width = 16
-
             if fits[key] is None: continue
             params = fits[key][0]
-            # evaluate fitted equation over ALL B values regardless of subset
-            yp_all = model(b_all, *params)
-            for di, rn in enumerate(row_nums):
-                c = ws.cell(row=rn, column=col)
-                c.value = round(float(yp_all[di]), 8)
+            yp = model(bx_k, *params)
+            for r_, v_ in zip(rn_k, yp):
+                c = ws.cell(row=int(r_), column=col)
+                c.value = round(float(v_), 8)
                 c.number_format = "0.00000000"
                 c.font = N_FONT; c.alignment = CTR
 
-        # 5d-2. raw Yes/No value columns (for overlay scatter markers) ─────────
-        # Rows aren't grouped by clip status, so each row gets its I_norm value
-        # written only into the matching column; the other column stays blank.
-        # A contiguous Reference over these columns then plots markers only at
-        # the rows that actually belong to that subset.
-        col_yes_raw = COL_OFF + 5   # L
-        col_no_raw  = COL_OFF + 6   # M
-        sc(ws.cell(row=hrow, column=col_yes_raw), "Yes_Raw_I", fill=SUB_FILL, font=B_FONT)
-        sc(ws.cell(row=hrow, column=col_no_raw),  "No_Raw_I",  fill=SUB_FILL, font=B_FONT)
-        ws.column_dimensions[get_column_letter(col_yes_raw)].width = 14
-        ws.column_dimensions[get_column_letter(col_no_raw)].width = 14
-
-        for di, rn in enumerate(row_nums):
-            target_col = col_yes_raw if rows_clip[di] == "yes" else (
-                         col_no_raw if rows_clip[di] == "no" else None)
-            if target_col is None:
-                continue
-            c = ws.cell(row=rn, column=target_col)
-            c.value = round(float(i_all[di]), 8)
-            c.number_format = "0.00000000"
-            c.font = N_FONT; c.alignment = CTR
+        RAW_COLS = {"mixed": (COL_OFF+5, rn_mixed, i_mixed, "Raw_Mixed"),
+                    "sm":    (COL_OFF+6, rn_sm,    i_sm,    "Raw_SM"),
+                    "poly":  (COL_OFF+7, rn_poly,  i_poly,  "Raw_Poly")}
+        for name, (col, rn_k, iy_k, hdr) in RAW_COLS.items():
+            sc(ws.cell(row=hrow, column=col), hdr, fill=SUB_FILL, font=B_FONT)
+            ws.column_dimensions[get_column_letter(col)].width = 14
+            for r_, v_ in zip(rn_k, iy_k):
+                c = ws.cell(row=int(r_), column=col)
+                c.value = round(float(v_), 8)
+                c.number_format = "0.00000000"
+                c.font = N_FONT; c.alignment = CTR
 
         # 5e. summary table ────────────────────────────────────────────────────
-        last_row = max(row_nums)
+        last_row = int(row_nums.max())
         sr = last_row + 3
 
-        # header
         ws.merge_cells(start_row=sr, start_column=1, end_row=sr, end_column=6)
         sc(ws.cell(row=sr, column=1),
            f"Curve Fit Results — {ws.title}", fill=HDR_FILL, font=W_FONT)
@@ -323,7 +286,7 @@ def fit_dosy(
             sc(ws.cell(row=sr, column=ci_), h, fill=SUB_FILL, font=B_FONT)
         sr += 1
 
-        def d_val(key, idx): # extract D from params safely
+        def d_val(key, idx):
             if fits[key] is None: return "failed"
             return float(fits[key][0][idx])
 
@@ -332,20 +295,13 @@ def fit_dosy(
             return round(fits[key][2], 6)
 
         summary_rows = [
-            ("All → Mono",     d_val("all_mono",1),
-             d_val("all_mono",0), r2_val("all_mono"), ""),
-            ("All → Bi (D1)",  d_val("all_bi",1),
-             d_val("all_bi",0),  r2_val("all_bi"),  "fast component"),
-            ("All → Bi (D2)",  d_val("all_bi",3),
-             d_val("all_bi",2),  r2_val("all_bi"),  "slow component"),
-            ("Yes → Mono",     d_val("yes_mono",1),
-             d_val("yes_mono",0), r2_val("yes_mono"), ""),
-            ("No  → Mono",     d_val("no_mono",1),
-             d_val("no_mono",0),  r2_val("no_mono"),  ""),
-            ("No  → Bi (D1)",  d_val("no_bi",1),
-             d_val("no_bi",0),   r2_val("no_bi"),   "fast component"),
-            ("No  → Bi (D2)",  d_val("no_bi",3),
-             d_val("no_bi",2),   r2_val("no_bi"),   "slow component"),
+            ("Mixed → Mono",    d_val("mixed_mono",1), d_val("mixed_mono",0), r2_val("mixed_mono"), ""),
+            ("Mixed → Bi (D1)", d_val("mixed_bi",1),   d_val("mixed_bi",0),   r2_val("mixed_bi"),  "fast component"),
+            ("Mixed → Bi (D2)", d_val("mixed_bi",3),   d_val("mixed_bi",2),   r2_val("mixed_bi"),  "slow component"),
+            ("SM → Mono",       d_val("sm_mono",1),    d_val("sm_mono",0),    r2_val("sm_mono"),   ""),
+            ("Poly → Mono",     d_val("poly_mono",1),  d_val("poly_mono",0),  r2_val("poly_mono"), ""),
+            ("Poly → Bi (D1)",  d_val("poly_bi",1),    d_val("poly_bi",0),    r2_val("poly_bi"),   "fast component"),
+            ("Poly → Bi (D2)",  d_val("poly_bi",3),    d_val("poly_bi",2),    r2_val("poly_bi"),   "slow component"),
         ]
 
         for row_data in summary_rows:
@@ -363,70 +319,42 @@ def fit_dosy(
         ws.column_dimensions["D"].width = 12
         ws.column_dimensions["E"].width = 18
 
-        # 5f. individual charts (one per fit) ─────────────────────────────────
-        dmin, dmax = min(row_nums), max(row_nums)
+        # 5f. overlay charts — 4 combos: Mixed(Mono/Bi) x SM(Mono) x Poly(Mono/Bi) ──
+        dmin, dmax = int(row_nums.min()), int(row_nums.max())
         xref_all = Reference(ws, min_col=xi, min_row=dmin, max_row=dmax)
-        yref_raw = Reference(ws, min_col=yi, min_row=dmin, max_row=dmax)
 
-        def col_ref(col_idx):
-            return Reference(ws, min_col=col_idx, min_row=dmin, max_row=dmax)
+        KEY_LABEL = {"mixed_mono": "Mixed-Mono", "mixed_bi": "Mixed-Bi",
+                     "sm_mono": "SM-Mono", "poly_mono": "Poly-Mono", "poly_bi": "Poly-Bi"}
+        KEY_COLOR = {"mixed_mono": "4472C4", "mixed_bi": "1F4E79",
+                     "sm_mono": "70AD47", "poly_mono": "ED7D31", "poly_bi": "C00000"}
 
-        # Chart height is fixed at 10cm; default Excel row height (~15pt ≈ 0.53cm)
-        # means ~19 rows are needed just to clear one chart's height. 18 rows was
-        # too tight and caused consecutive charts to overlap — use 26 for a clean gap.
+        raw_defs = [
+            (RAW_COLS["mixed"][0], "Mixed-Raw", "4472C4", "circle"),
+            (RAW_COLS["sm"][0],    "SM-Raw",    "70AD47", "triangle"),
+            (RAW_COLS["poly"][0],  "Poly-Raw",  "ED7D31", "diamond"),
+        ]
+
+        overlay_combos = [
+            ("Mixed-Mono + SM-Mono + Poly-Mono", ["mixed_mono", "sm_mono", "poly_mono"]),
+            ("Mixed-Bi + SM-Mono + Poly-Mono",   ["mixed_bi",   "sm_mono", "poly_mono"]),
+            ("Mixed-Mono + SM-Mono + Poly-Bi",   ["mixed_mono", "sm_mono", "poly_bi"]),
+            ("Mixed-Bi + SM-Mono + Poly-Bi",     ["mixed_bi",   "sm_mono", "poly_bi"]),
+        ]
+
         CHART_ROW_SPACING = 26
         chart_anchor_row = sr + 2
-        chart_configs = [
-            ("All Data — Mono-Exp",   xref_all, yref_raw, col_ref(COL_OFF+0)),
-            ("All Data — Bi-Exp",     xref_all, yref_raw, col_ref(COL_OFF+1)),
-            ("Clipped=Yes — Mono",    xref_all, yref_raw, col_ref(COL_OFF+2)),
-            ("Clipped=No  — Mono",    xref_all, yref_raw, col_ref(COL_OFF+3)),
-            ("Clipped=No  — Bi-Exp",  xref_all, yref_raw, col_ref(COL_OFF+4)),
-        ]
-        for k, (title, xr, yr, fr) in enumerate(chart_configs):
-            anchor = f"A{chart_anchor_row + k*CHART_ROW_SPACING}"
-            make_scatter(ws, title, xr, yr, fr, anchor)
-
-        # 5g. overlay charts — all 2×1×2 combinations of subset-fit choices ───
-        # All has 2 options (Mono/Bi), Yes has 1 option (Mono only), No has 2
-        # options (Mono/Bi)  →  2 * 1 * 2 = 4 overlay plots, 3 curves each.
-        KEY_LABEL = {
-            "all_mono": "All-Mono", "all_bi": "All-Bi",
-            "yes_mono": "Yes-Mono",
-            "no_mono":  "No-Mono",  "no_bi":  "No-Bi",
-        }
-        KEY_COLOR = {
-            "all_mono": "4472C4",  # blue
-            "all_bi":   "1F4E79",  # dark blue
-            "yes_mono": "70AD47",  # green
-            "no_mono":  "ED7D31",  # orange
-            "no_bi":    "C00000",  # dark red
-        }
-        overlay_combos = [
-            ("Overlay: All-Mono + Yes-Mono + No-Mono", ["all_mono", "yes_mono", "no_mono"]),
-            ("Overlay: All-Bi + Yes-Mono + No-Mono",   ["all_bi",   "yes_mono", "no_mono"]),
-            ("Overlay: All-Mono + Yes-Mono + No-Bi",   ["all_mono", "yes_mono", "no_bi"]),
-            ("Overlay: All-Bi + Yes-Mono + No-Bi",     ["all_bi",   "yes_mono", "no_bi"]),
-        ]
-
-        # raw Yes/No data-point markers, shown on every overlay plot
-        raw_defs = [
-            (col_yes_raw, "Yes-Raw", "70AD47"),  # green
-            (col_no_raw,  "No-Raw",  "ED7D31"),  # orange
-        ]
-
-        overlay_anchor_row = chart_anchor_row + len(chart_configs) * CHART_ROW_SPACING
         placed = 0
         for title, keys in overlay_combos:
             if any(fits[k_] is None for k_ in keys):
                 print(f"    [SKIP OVERLAY] {title}: missing fit(s)")
                 continue
             curve_defs = [(key_to_col[k_], KEY_LABEL[k_], KEY_COLOR[k_]) for k_ in keys]
-            anchor = f"A{overlay_anchor_row + placed*CHART_ROW_SPACING}"
+            anchor = f"A{chart_anchor_row + placed*CHART_ROW_SPACING}"
             make_overlay(ws, title, xref_all, curve_defs, raw_defs, anchor)
             placed += 1
 
-        print(f"  [OK] {ws.title} | N={len(b_all)} yes={mask_yes.sum()} no={mask_no.sum()} | overlays={placed}")
+        print(f"  [OK] {ws.title} | N={len(b_raw)} mixed_kept={len(b_mixed)} "
+              f"sm_kept={len(b_sm)} poly_kept={len(b_poly)} | overlays={placed}")
 
     # ── 6. File discovery & main loop ─────────────────────────────────────────
 
