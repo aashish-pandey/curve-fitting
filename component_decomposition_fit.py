@@ -20,6 +20,9 @@ For every sheet in every matching file the function:
   • appends fitted-value columns (G–K) in the same rows as the data
   • writes a results summary table below the data
   • embeds one openpyxl ScatterChart per fit (5 charts total) below the summary
+  • embeds 4 OVERLAY ScatterCharts, each combining one fit from All (Mono/Bi),
+    the single Yes-Mono fit, and one fit from No (Mono/Bi) — i.e. all 2×1×2
+    combinations of subset-fit choices — below the individual charts
   • saves back to the same file
 
 Dependencies: math, os, glob  (stdlib)  +  numpy  +  openpyxl
@@ -132,7 +135,7 @@ def fit_dosy(
         if math.isnan(v) or math.isinf(v): return str(v)
         return f"{v:.4e}" if (abs(v) < 1e-3 or abs(v) > 9999) else f"{v:.6f}"
 
-    # ── 4. Chart builder ──────────────────────────────────────────────────────
+    # ── 4. Chart builders ─────────────────────────────────────────────────────
 
     def make_scatter(ws, title, xref, yref_data, yref_fit, anchor):
         ch = ScatterChart(); ch.scatterStyle = "smoothMarker"
@@ -152,6 +155,23 @@ def fit_dosy(
             fit.graphicalProperties.line.solidFill = "FF0000"
             fit.graphicalProperties.line.width = 18000
             ch.series.append(fit)
+
+        ws.add_chart(ch, anchor)
+
+    def make_overlay(ws, title, xref, curve_defs, anchor):
+        """curve_defs: list of (col_idx, label, hex_color) — one line per fit, no markers."""
+        ch = ScatterChart(); ch.scatterStyle = "lineMarker"
+        ch.title = title; ch.width = 16; ch.height = 10
+        ch.x_axis.title = x_col; ch.y_axis.title = y_col
+        ch.x_axis.numFmt = "0.00E+00"; ch.style = 2
+
+        for col_idx, label, color in curve_defs:
+            yref = Reference(ws, min_col=col_idx, min_row=xref.min_row, max_row=xref.max_row)
+            s = Series(yref, xref, title=label)
+            s.marker.symbol = "none"
+            s.graphicalProperties.line.solidFill = color
+            s.graphicalProperties.line.width = 20000
+            ch.series.append(s)
 
         ws.add_chart(ch, anchor)
 
@@ -219,6 +239,9 @@ def fit_dosy(
         FIT_KEYS   = ["all_mono","all_bi","yes_mono","no_mono","no_bi"]
         FIT_MODELS = [mono, bi, mono, mono, bi]
         COL_OFF    = 7   # G
+
+        # key -> column index, used later for overlay charts too
+        key_to_col = {key: COL_OFF + k for k, key in enumerate(FIT_KEYS)}
 
         for k, (key, hdr, model) in enumerate(zip(FIT_KEYS, FIT_HDRS, FIT_MODELS)):
             col = COL_OFF + k
@@ -290,7 +313,7 @@ def fit_dosy(
         ws.column_dimensions["D"].width = 12
         ws.column_dimensions["E"].width = 18
 
-        # 5f. charts ───────────────────────────────────────────────────────────
+        # 5f. individual charts (one per fit) ─────────────────────────────────
         dmin, dmax = min(row_nums), max(row_nums)
         xref_all = Reference(ws, min_col=xi, min_row=dmin, max_row=dmax)
         yref_raw = Reference(ws, min_col=yi, min_row=dmin, max_row=dmax)
@@ -310,7 +333,40 @@ def fit_dosy(
             anchor = f"A{chart_anchor_row + k*18}"
             make_scatter(ws, title, xr, yr, fr, anchor)
 
-        print(f"  [OK] {ws.title} | N={len(b_all)} yes={mask_yes.sum()} no={mask_no.sum()}")
+        # 5g. overlay charts — all 2×1×2 combinations of subset-fit choices ───
+        # All has 2 options (Mono/Bi), Yes has 1 option (Mono only), No has 2
+        # options (Mono/Bi)  →  2 * 1 * 2 = 4 overlay plots, 3 curves each.
+        KEY_LABEL = {
+            "all_mono": "All-Mono", "all_bi": "All-Bi",
+            "yes_mono": "Yes-Mono",
+            "no_mono":  "No-Mono",  "no_bi":  "No-Bi",
+        }
+        KEY_COLOR = {
+            "all_mono": "4472C4",  # blue
+            "all_bi":   "1F4E79",  # dark blue
+            "yes_mono": "70AD47",  # green
+            "no_mono":  "ED7D31",  # orange
+            "no_bi":    "C00000",  # dark red
+        }
+        overlay_combos = [
+            ("Overlay: All-Mono + Yes-Mono + No-Mono", ["all_mono", "yes_mono", "no_mono"]),
+            ("Overlay: All-Bi + Yes-Mono + No-Mono",   ["all_bi",   "yes_mono", "no_mono"]),
+            ("Overlay: All-Mono + Yes-Mono + No-Bi",   ["all_mono", "yes_mono", "no_bi"]),
+            ("Overlay: All-Bi + Yes-Mono + No-Bi",     ["all_bi",   "yes_mono", "no_bi"]),
+        ]
+
+        overlay_anchor_row = chart_anchor_row + len(chart_configs) * 18
+        placed = 0
+        for title, keys in overlay_combos:
+            if any(fits[k_] is None for k_ in keys):
+                print(f"    [SKIP OVERLAY] {title}: missing fit(s)")
+                continue
+            curve_defs = [(key_to_col[k_], KEY_LABEL[k_], KEY_COLOR[k_]) for k_ in keys]
+            anchor = f"A{overlay_anchor_row + placed*18}"
+            make_overlay(ws, title, xref_all, curve_defs, anchor)
+            placed += 1
+
+        print(f"  [OK] {ws.title} | N={len(b_all)} yes={mask_yes.sum()} no={mask_no.sum()} | overlays={placed}")
 
     # ── 6. File discovery & main loop ─────────────────────────────────────────
 
